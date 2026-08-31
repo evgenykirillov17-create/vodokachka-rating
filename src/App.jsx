@@ -642,7 +642,7 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
-        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-lg max-h-[85vh] overflow-y-auto"
+        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-lg max-h-[85dvh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between">
