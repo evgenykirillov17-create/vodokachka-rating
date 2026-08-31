@@ -304,6 +304,13 @@ function normalizeName(raw) {
   return String(raw).replace(/\s*\([^)]*\)\s*$/, "").trim();
 }
 
+// Для поиска: "ё" и "е" считаются одной и той же буквой (Легенький ⇄ Лёгенький),
+// плюс регистр не важен. Не путать с normalizeName выше — та чистит имя из файла,
+// эта только приводит строку к виду для сравнения при поиске.
+function normalizeForSearch(str) {
+  return String(str).toLowerCase().replace(/ё/g, "е");
+}
+
 // Приводит имя пары к единому порядку ("Иванов/Петров" и "Петров/Иванов" — одна и та же пара),
 // чтобы история и рейтинг не разваливались на два разных "игрока" из-за порядка перечисления.
 // На соло-имена (без "/") не влияет.
@@ -550,12 +557,12 @@ function MedalBadge({ rank }) {
 
 function RatingTable({ standings, query, onSelectPlayer }) {
   const filtered = query
-    ? standings.filter((s) => s.name.toLowerCase().includes(query.toLowerCase()))
+    ? standings.filter((s) => normalizeForSearch(s.name).includes(normalizeForSearch(query)))
     : standings;
 
   if (standings.length === 0) {
     return (
-      <div className="text-center py-16 text-slate-400">
+      <div className="text-center py-16 text-slate-600">
         <Users className="mx-auto mb-3 opacity-40" size={32} />
         <p>Пока нет данных для этого рейтинга.</p>
       </div>
@@ -569,10 +576,10 @@ function RatingTable({ standings, query, onSelectPlayer }) {
     );
   }
   return (
-    <div className="overflow-x-auto rounded-xl border border-slate-700/60">
+    <div className="overflow-x-auto rounded-xl border border-slate-300/60">
       <table className="w-full text-sm">
         <thead>
-          <tr className="bg-slate-800/80 text-slate-300 text-left uppercase tracking-wide text-xs">
+          <tr className="bg-slate-200/80 text-slate-700 text-left uppercase tracking-wide text-xs">
             <th className="py-3 px-4 font-medium">#</th>
             <th className="py-3 px-4 font-medium">Игрок</th>
             <th className="py-3 px-4 font-medium text-right">Турниров</th>
@@ -586,11 +593,11 @@ function RatingTable({ standings, query, onSelectPlayer }) {
               <tr
                 key={s.name}
                 onClick={() => onSelectPlayer(s.name)}
-                className={`border-t border-slate-800 cursor-pointer hover:bg-slate-800/60 transition-colors ${rank % 2 === 0 ? "bg-slate-900/10" : "bg-slate-900/40"} ${query ? "ring-1 ring-red-500/40" : ""}`}
+                className={`border-t border-slate-200 cursor-pointer hover:bg-slate-200/60 transition-colors ${rank % 2 === 0 ? "bg-slate-100/10" : "bg-slate-100/40"} ${query ? "ring-1 ring-red-500/40" : ""}`}
               >
                 <td className="py-2.5 px-4"><MedalBadge rank={rank} /></td>
-                <td className="py-2.5 px-4 text-slate-100 font-medium">{s.name}</td>
-                <td className="py-2.5 px-4 text-right text-slate-400 tabular-nums">{s.tournamentsPlayed}</td>
+                <td className="py-2.5 px-4 text-slate-900 font-medium">{s.name}</td>
+                <td className="py-2.5 px-4 text-right text-slate-600 tabular-nums">{s.tournamentsPlayed}</td>
                 <td className="py-2.5 px-4 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>{Math.round(s.avg)}</td>
               </tr>
             );
@@ -632,12 +639,12 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
   return (
     <div className="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4" onClick={onClose}>
       <div
-        className="bg-slate-900 border border-slate-700 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[85vh] overflow-y-auto"
+        className="bg-slate-100 border border-slate-300 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[85vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 bg-slate-900 border-b border-slate-800 px-5 py-4 flex items-center justify-between">
-          <h2 className="text-slate-100 font-semibold text-base">{playerName}</h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
+        <div className="sticky top-0 bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between">
+          <h2 className="text-slate-900 font-semibold text-base">{playerName}</h2>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-700">
             <X size={18} />
           </button>
         </div>
@@ -647,9 +654,9 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
           {totals.hasStats ? (
             <div className="grid grid-cols-3 gap-2 mb-2">
               <StatBox label="Матчей" value={totals.matches} />
-              <StatBox label="Победы" value={totals.wins} accent="text-green-400" />
+              <StatBox label="Победы" value={totals.wins} accent="text-green-600" />
               <StatBox label="Ничьи" value={totals.draws} />
-              <StatBox label="Поражения" value={totals.losses} accent="text-red-400" />
+              <StatBox label="Поражения" value={totals.losses} accent="text-red-600" />
               <StatBox label="Голы забито" value={totals.goalsFor} />
               <StatBox label="Голы пропущено" value={totals.goalsAgainst} />
             </div>
@@ -662,9 +669,9 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
           <h3 className="text-xs uppercase tracking-wide text-slate-500 mt-5 mb-2">По турнирам</h3>
           <div className="space-y-2">
             {history.map((h, i) => (
-              <div key={i} className="bg-slate-800/50 rounded-lg px-3 py-2.5">
+              <div key={i} className="bg-slate-200/50 rounded-lg px-3 py-2.5">
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm text-slate-200 font-medium">{h.tournamentName}</span>
+                  <span className="text-sm text-slate-800 font-medium">{h.tournamentName}</span>
                   <span className="font-mono text-sm font-semibold" style={{ color: BRAND_RED }}>{Math.round(h.pct)}%</span>
                 </div>
                 {h.hasStats ? (
@@ -672,7 +679,7 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
                     {h.played} матчей · {h.wins}В-{h.draws}Н-{h.losses}П · голы {h.goalsFor}:{h.goalsAgainst}
                   </p>
                 ) : (
-                  <p className="text-xs text-slate-600">только итоговый %</p>
+                  <p className="text-xs text-slate-400">только итоговый %</p>
                 )}
               </div>
             ))}
@@ -685,8 +692,8 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
 
 function StatBox({ label, value, accent }) {
   return (
-    <div className="bg-slate-800/60 rounded-lg px-3 py-2 text-center">
-      <div className={`text-lg font-mono font-semibold tabular-nums ${accent || "text-slate-100"}`}>{value}</div>
+    <div className="bg-slate-200/60 rounded-lg px-3 py-2 text-center">
+      <div className={`text-lg font-mono font-semibold tabular-nums ${accent || "text-slate-900"}`}>{value}</div>
       <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
     </div>
   );
@@ -757,7 +764,7 @@ function MatrixView({ tournaments, cutoffs }) {
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               format === f.id
                 ? "text-white"
-                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                : "bg-slate-200 text-slate-700 hover:bg-slate-300"
             }`}
           >
             {f.label}
@@ -771,7 +778,7 @@ function MatrixView({ tournaments, cutoffs }) {
       </p>
 
       {list.length === 0 || standings.length === 0 ? (
-        <div className="text-center py-16 text-slate-400">
+        <div className="text-center py-16 text-slate-600">
           <Users className="mx-auto mb-3 opacity-40" size={32} />
           <p>Пока нет данных для этого формата.</p>
         </div>
@@ -780,11 +787,11 @@ function MatrixView({ tournaments, cutoffs }) {
           <div ref={topRef} onScroll={onTopScroll} className="overflow-x-auto overflow-y-hidden mb-1" style={{ height: 14 }}>
             <div style={{ width: scrollWidth, height: 1 }} />
           </div>
-          <div ref={bottomRef} onScroll={onBottomScroll} className="overflow-x-auto rounded-xl border border-slate-700/60">
+          <div ref={bottomRef} onScroll={onBottomScroll} className="overflow-x-auto rounded-xl border border-slate-300/60">
             <table className="text-sm border-collapse w-full">
               <thead>
-                <tr className="bg-slate-800/80 text-slate-300 text-xs">
-                  <th className="sticky left-0 bg-slate-800 z-10 px-3 py-2 text-left font-medium whitespace-nowrap">Игрок</th>
+                <tr className="bg-slate-200/80 text-slate-700 text-xs">
+                  <th className="sticky left-0 bg-slate-200 z-10 px-3 py-2 text-left font-medium whitespace-nowrap">Игрок</th>
                   <th className="px-3 py-2 text-right font-medium whitespace-nowrap">Турниров</th>
                   {list.map((t) => (
                     <th key={t.id} className="px-2 py-2 text-right font-medium whitespace-nowrap">{t.name}</th>
@@ -793,13 +800,13 @@ function MatrixView({ tournaments, cutoffs }) {
               </thead>
               <tbody>
                 {standings.map((s, i) => (
-                  <tr key={s.name} className={`border-t border-slate-800 ${i % 2 === 0 ? "bg-slate-900/10" : "bg-slate-900/40"}`}>
-                    <td className="sticky left-0 bg-slate-950 px-3 py-1.5 text-slate-100 font-medium whitespace-nowrap">{s.name}</td>
-                    <td className="px-3 py-1.5 text-right text-slate-400 tabular-nums">{s.tournamentsPlayed}</td>
+                  <tr key={s.name} className={`border-t border-slate-200 ${i % 2 === 0 ? "bg-slate-100/10" : "bg-slate-100/40"}`}>
+                    <td className="sticky left-0 bg-white px-3 py-1.5 text-slate-900 font-medium whitespace-nowrap">{s.name}</td>
+                    <td className="px-3 py-1.5 text-right text-slate-600 tabular-nums">{s.tournamentsPlayed}</td>
                     {list.map((t, idx) => {
                       const v = cellData[s.name]?.[idx];
                       return (
-                        <td key={t.id} className="px-2 py-1.5 text-right tabular-nums text-slate-300">
+                        <td key={t.id} className="px-2 py-1.5 text-right tabular-nums text-slate-700">
                           {v !== undefined ? Math.round(v) : ""}
                         </td>
                       );
@@ -839,7 +846,7 @@ function PublicView({ tournaments, cutoffs, isAdmin }) {
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               format === f.id
                 ? "text-white"
-                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                : "bg-slate-200 text-slate-700 hover:bg-slate-300"
             }`}
           >
             {f.label}
@@ -851,20 +858,20 @@ function PublicView({ tournaments, cutoffs, isAdmin }) {
         <div className="flex flex-wrap items-center gap-2 mb-5 text-sm">
           <button
             onClick={() => setMode("all")}
-            className={`px-3 py-1.5 rounded-md ${mode === "all" ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
+            className={`px-3 py-1.5 rounded-md ${mode === "all" ? "bg-slate-300 text-white" : "text-slate-600 hover:text-slate-800"}`}
           >
             За всё время (только вы)
           </button>
           <button
             onClick={() => setMode("public")}
             disabled={!cutoffs[format]}
-            className={`px-3 py-1.5 rounded-md disabled:opacity-30 disabled:cursor-not-allowed ${mode === "public" ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
+            className={`px-3 py-1.5 rounded-md disabled:opacity-30 disabled:cursor-not-allowed ${mode === "public" ? "bg-slate-300 text-white" : "text-slate-600 hover:text-slate-800"}`}
           >
             Публичный (актуальные)
           </button>
           <button
             onClick={() => setMode("last3")}
-            className={`px-3 py-1.5 rounded-md ${mode === "last3" ? "bg-slate-700 text-white" : "text-slate-400 hover:text-slate-200"}`}
+            className={`px-3 py-1.5 rounded-md ${mode === "last3" ? "bg-slate-300 text-white" : "text-slate-600 hover:text-slate-800"}`}
           >
             Топ-30 за последние 3 турнира
           </button>
@@ -878,7 +885,7 @@ function PublicView({ tournaments, cutoffs, isAdmin }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Найти себя по имени..."
-          className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-red-500"
+          className="w-full bg-slate-100 border border-slate-300 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-red-500"
         />
       </div>
 
@@ -973,8 +980,8 @@ function HistoryImport({ tournaments, saveTournaments, addToRoster }) {
   };
 
   return (
-    <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
-      <h3 className="text-slate-200 font-semibold mb-1 flex items-center gap-2">
+    <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-5">
+      <h3 className="text-slate-800 font-semibold mb-1 flex items-center gap-2">
         <History size={18} /> Импорт истории рейтинга (мастер-файл)
       </h3>
       <p className="text-xs text-slate-500 mb-4">
@@ -985,19 +992,19 @@ function HistoryImport({ tournaments, saveTournaments, addToRoster }) {
         type="file"
         accept=".xlsx"
         onChange={handleFile}
-        className="block w-full text-sm text-slate-300 mb-4 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-slate-700 file:text-slate-200 file:text-sm hover:file:bg-slate-600"
+        className="block w-full text-sm text-slate-700 mb-4 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-slate-300 file:text-slate-800 file:text-sm hover:file:bg-slate-400"
       />
 
       {sheetNames.length > 0 && (
         <div className="space-y-2 mb-4">
-          <p className="text-xs text-slate-400">Сопоставьте вкладки файла с форматами:</p>
+          <p className="text-xs text-slate-600">Сопоставьте вкладки файла с форматами:</p>
           {sheetNames.map((n) => (
-            <div key={n} className="flex items-center justify-between gap-3 bg-slate-900/50 rounded-md px-3 py-2">
-              <span className="text-sm text-slate-300 truncate">{n}</span>
+            <div key={n} className="flex items-center justify-between gap-3 bg-slate-100/50 rounded-md px-3 py-2">
+              <span className="text-sm text-slate-700 truncate">{n}</span>
               <select
                 value={mapping[n] || ""}
                 onChange={(e) => setMapping((m) => ({ ...m, [n]: e.target.value }))}
-                className="bg-slate-900 border border-slate-700 rounded-md text-xs text-slate-200 px-2 py-1 shrink-0"
+                className="bg-slate-100 border border-slate-300 rounded-md text-xs text-slate-800 px-2 py-1 shrink-0"
               >
                 <option value="">— не импортировать —</option>
                 {FORMATS.map((f) => (
@@ -1009,7 +1016,7 @@ function HistoryImport({ tournaments, saveTournaments, addToRoster }) {
 
           <div className="flex flex-wrap gap-3 pt-2">
             {FORMATS.map((f) => (
-              <label key={f.id} className="flex items-center gap-1.5 text-xs text-slate-400">
+              <label key={f.id} className="flex items-center gap-1.5 text-xs text-slate-600">
                 <input
                   type="checkbox"
                   checked={replaceFlags[f.id]}
@@ -1032,13 +1039,13 @@ function HistoryImport({ tournaments, saveTournaments, addToRoster }) {
       )}
 
       {error && (
-        <div className="flex items-start gap-2 bg-red-950/40 border border-red-800/60 text-red-300 text-sm rounded-md p-3">
+        <div className="flex items-start gap-2 bg-red-50 border border-red-300 text-red-700 text-sm rounded-md p-3">
           <AlertCircle size={16} className="mt-0.5 shrink-0" />
           <span>{error}</span>
         </div>
       )}
       {success && (
-        <div className="flex items-start gap-2 bg-emerald-950/40 border border-emerald-800/60 text-emerald-300 text-sm rounded-md p-3">
+        <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-300 text-emerald-700 text-sm rounded-md p-3">
           <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
           <span>{success}</span>
         </div>
@@ -1059,10 +1066,10 @@ function TournamentRow({ index, tournament, onRename, onRemove }) {
   };
 
   return (
-    <li className="flex items-center justify-between gap-2 bg-slate-900/50 rounded-md px-3 py-1.5 text-sm">
+    <li className="flex items-center justify-between gap-2 bg-slate-100/50 rounded-md px-3 py-1.5 text-sm">
       {editing ? (
         <div className="flex items-center gap-2 flex-1">
-          <span className="text-slate-600 tabular-nums">{index + 1}.</span>
+          <span className="text-slate-400 tabular-nums">{index + 1}.</span>
           <input
             autoFocus
             value={value}
@@ -1071,22 +1078,22 @@ function TournamentRow({ index, tournament, onRename, onRemove }) {
               if (e.key === "Enter") commit();
               if (e.key === "Escape") { setValue(tournament.name); setEditing(false); }
             }}
-            className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100"
+            className="flex-1 bg-slate-100 border border-slate-300 rounded px-2 py-1 text-sm text-slate-900"
           />
-          <button onClick={commit} className="text-green-400 hover:text-green-300 shrink-0">
+          <button onClick={commit} className="text-green-600 hover:text-green-700 shrink-0">
             <Check size={15} />
           </button>
         </div>
       ) : (
         <>
-          <span className="text-slate-300 truncate">
-            <span className="text-slate-600 tabular-nums mr-2">{index + 1}.</span>{tournament.name}
+          <span className="text-slate-700 truncate">
+            <span className="text-slate-400 tabular-nums mr-2">{index + 1}.</span>{tournament.name}
           </span>
           <div className="flex items-center gap-2 shrink-0">
-            <button onClick={() => setEditing(true)} className="text-slate-600 hover:text-slate-300" title="Переименовать">
+            <button onClick={() => setEditing(true)} className="text-slate-400 hover:text-slate-700" title="Переименовать">
               <Pencil size={13} />
             </button>
-            <button onClick={onRemove} className="text-slate-600 hover:text-red-400" title="Удалить">
+            <button onClick={onRemove} className="text-slate-400 hover:text-red-500" title="Удалить">
               <Trash2 size={14} />
             </button>
           </div>
@@ -1311,8 +1318,8 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
 
       <HistoryImport tournaments={tournaments} saveTournaments={saveTournaments} addToRoster={addToRoster} />
 
-      <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
-        <h3 className="text-slate-200 font-semibold mb-4 flex items-center gap-2">
+      <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-5">
+        <h3 className="text-slate-800 font-semibold mb-4 flex items-center gap-2">
           <Upload size={18} /> Импорт турнира
         </h3>
         <div className="flex flex-wrap gap-2 mb-4">
@@ -1322,7 +1329,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
               onClick={() => setFormat(f.id)}
               style={format === f.id ? { backgroundColor: BRAND_BLUE } : undefined}
               className={`px-3 py-1.5 rounded-md text-sm ${
-                format === f.id ? "text-white font-medium" : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+                format === f.id ? "text-white font-medium" : "bg-slate-300 text-slate-700 hover:bg-slate-400"
               }`}
             >
               {f.label}
@@ -1330,31 +1337,31 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
           ))}
         </div>
 
-        <label className="block text-xs text-slate-400 mb-1">Файл турнира (.xlsx)</label>
+        <label className="block text-xs text-slate-600 mb-1">Файл турнира (.xlsx)</label>
         <input
           type="file"
           accept=".xlsx"
           onChange={handleFile}
-          className="block w-full text-sm text-slate-300 mb-3 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-slate-700 file:text-slate-200 file:text-sm hover:file:bg-slate-600"
+          className="block w-full text-sm text-slate-700 mb-3 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-slate-300 file:text-slate-800 file:text-sm hover:file:bg-slate-400"
         />
 
-        <label className="block text-xs text-slate-400 mb-1">Название турнира (для вкладки/списка)</label>
+        <label className="block text-xs text-slate-600 mb-1">Название турнира (для вкладки/списка)</label>
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Водокачка №38"
-          className="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-100 mb-4"
+          className="w-full bg-slate-100 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 mb-4"
         />
 
         {error && (
-          <div className="flex items-start gap-2 bg-red-950/40 border border-red-800/60 text-red-300 text-sm rounded-md p-3 mb-3">
+          <div className="flex items-start gap-2 bg-red-50 border border-red-300 text-red-700 text-sm rounded-md p-3 mb-3">
             <AlertCircle size={16} className="mt-0.5 shrink-0" />
             <span>{error}</span>
           </div>
         )}
         {success && (
-          <div className="flex items-start gap-2 bg-emerald-950/40 border border-emerald-800/60 text-emerald-300 text-sm rounded-md p-3 mb-3">
+          <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-300 text-emerald-700 text-sm rounded-md p-3 mb-3">
             <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
             <span>{success}</span>
           </div>
@@ -1363,7 +1370,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
         {preview && (
           <div className="mb-4">
             {formatMismatch && (
-              <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-700/60 text-amber-200 text-sm rounded-md p-3 mb-3">
+              <div className="flex items-start gap-2 bg-amber-50 border border-amber-300 text-amber-800 text-sm rounded-md p-3 mb-3">
                 <AlertCircle size={16} className="mt-0.5 shrink-0" />
                 <span>
                   Похоже, это на самом деле {formatMismatch === "pair" ? "парный" : "сольный"} турнир
@@ -1372,20 +1379,20 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
                 </span>
               </div>
             )}
-            <p className="text-xs text-slate-400 mb-2">
+            <p className="text-xs text-slate-600 mb-2">
               Проверка: G={preview.meta.G}, верхняя сетка={preview.meta.vsSize}, максимум %={100}, идеальные очки/матч={preview.meta.idealNorm}
             </p>
 
             {format === "pair" && Object.keys(pairMap).length > 0 && (
-              <div className="mb-4 bg-slate-900/60 border border-slate-700 rounded-lg p-3">
-                <p className="text-xs text-slate-400 mb-2">
+              <div className="mb-4 bg-slate-100/60 border border-slate-300 rounded-lg p-3">
+                <p className="text-xs text-slate-600 mb-2">
                   Сопоставление пар с каталогом игроков — проверьте и заполните, где не нашлось однозначного совпадения:
                 </p>
                 <div className="space-y-2">
                   {Object.entries(pairMap).map(([pairName, info]) => {
                     const resolved = info.values.every((v) => v && v.trim());
                     return (
-                      <div key={pairName} className={`flex flex-wrap items-center gap-2 text-xs rounded-md px-2 py-1.5 ${resolved ? "bg-slate-800/50" : "bg-amber-950/30 border border-amber-800/40"}`}>
+                      <div key={pairName} className={`flex flex-wrap items-center gap-2 text-xs rounded-md px-2 py-1.5 ${resolved ? "bg-slate-200/50" : "bg-amber-50 border border-amber-300"}`}>
                         <span className="text-slate-500 w-40 shrink-0">{pairName}</span>
                         {info.raw.map((rawSurname, idx) => (
                           <div key={idx} className="flex items-center gap-1">
@@ -1394,7 +1401,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
                               value={info.values[idx]}
                               onChange={(e) => updatePairValue(pairName, idx, e.target.value)}
                               placeholder={`Полное имя (${rawSurname})`}
-                              className={`bg-slate-900 border rounded px-2 py-1 text-xs w-44 ${info.values[idx] ? "border-slate-700 text-slate-200" : "border-amber-700 text-amber-200"}`}
+                              className={`bg-slate-100 border rounded px-2 py-1 text-xs w-44 ${info.values[idx] ? "border-slate-300 text-slate-800" : "border-amber-400 text-amber-800"}`}
                             />
                             <datalist id={`roster-${pairName}-${idx}`}>
                               {info.candidates[idx].map((c) => <option key={c} value={c} />)}
@@ -1409,9 +1416,9 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
               </div>
             )}
 
-            <div className="max-h-96 overflow-y-auto rounded-lg border border-slate-700">
+            <div className="max-h-96 overflow-y-auto rounded-lg border border-slate-300">
               <table className="w-full text-xs">
-                <thead className="bg-slate-800 text-slate-400 sticky top-0">
+                <thead className="bg-slate-200 text-slate-600 sticky top-0">
                   <tr>
                     <th className="text-left py-2 px-3">Игрок</th>
                     <th className="text-right py-2 px-3">Матчей</th>
@@ -1425,12 +1432,12 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
                 </thead>
                 <tbody>
                   {rows.map((r, i) => (
-                    <tr key={r.name} className="border-t border-slate-800 text-slate-300">
+                    <tr key={r.name} className="border-t border-slate-200 text-slate-700">
                       <td className="py-1.5 px-3">{r.name}</td>
                       <td className="py-1.5 px-3 text-right tabular-nums">{r.played}</td>
-                      <td className="py-1.5 px-3 text-right tabular-nums text-green-400">{r.wins}</td>
-                      <td className="py-1.5 px-3 text-right tabular-nums text-slate-400">{r.draws}</td>
-                      <td className="py-1.5 px-3 text-right tabular-nums text-red-400">{r.losses}</td>
+                      <td className="py-1.5 px-3 text-right tabular-nums text-green-600">{r.wins}</td>
+                      <td className="py-1.5 px-3 text-right tabular-nums text-slate-600">{r.draws}</td>
+                      <td className="py-1.5 px-3 text-right tabular-nums text-red-600">{r.losses}</td>
                       <td className="py-1.5 px-3 text-right tabular-nums whitespace-nowrap">{r.goalsFor}:{r.goalsAgainst}</td>
                       <td className="py-1.5 px-3 text-right tabular-nums">{r.O}</td>
                       <td className="py-1 px-3 text-right">
@@ -1442,7 +1449,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
                             const val = e.target.value === "" ? "" : Number(e.target.value);
                             setRows((prev) => prev.map((row, idx) => (idx === i ? { ...row, pct: val } : row)));
                           }}
-                          className="w-20 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right tabular-nums"
+                          className="w-20 bg-slate-100 border border-slate-300 rounded px-1.5 py-0.5 text-right tabular-nums"
                           style={{ color: BRAND_RED }}
                         />
                       </td>
@@ -1451,9 +1458,9 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
                 </tbody>
               </table>
             </div>
-            <p className="text-xs text-slate-600 mt-1">Значения "%" можно поправить вручную перед сохранением — например, если нужно скорректировать спорный случай.</p>
+            <p className="text-xs text-slate-400 mt-1">Значения "%" можно поправить вручную перед сохранением — например, если нужно скорректировать спорный случай.</p>
             {format === "pair" && !allPairsResolved && (
-              <p className="text-amber-400 text-xs mt-2">Есть неразрешённые фамилии — заполните полные имена выше, прежде чем сохранять.</p>
+              <p className="text-amber-600 text-xs mt-2">Есть неразрешённые фамилии — заполните полные имена выше, прежде чем сохранять.</p>
             )}
             <button
               onClick={confirmSave}
@@ -1467,38 +1474,38 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
         )}
       </div>
 
-      <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
-        <h3 className="text-slate-200 font-semibold mb-4">Турниры по форматам</h3>
-        <div className="flex items-center gap-3 mb-4 bg-slate-900/50 rounded-md px-3 py-2">
+      <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-5">
+        <h3 className="text-slate-800 font-semibold mb-4">Турниры по форматам</h3>
+        <div className="flex items-center gap-3 mb-4 bg-slate-100/50 rounded-md px-3 py-2">
           <button
             onClick={fixExistingRatings}
             disabled={fixBusy}
-            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 text-xs px-3 py-1.5 rounded-md shrink-0"
+            className="bg-slate-300 hover:bg-slate-400 disabled:opacity-50 text-slate-800 text-xs px-3 py-1.5 rounded-md shrink-0"
           >
             Поднять старые значения ниже {MIN_RATING} до {MIN_RATING}
           </button>
-          {fixResult && <span className="text-xs text-slate-400">{fixResult}</span>}
+          {fixResult && <span className="text-xs text-slate-600">{fixResult}</span>}
         </div>
-        <div className="flex items-center gap-3 mb-4 bg-slate-900/50 rounded-md px-3 py-2">
+        <div className="flex items-center gap-3 mb-4 bg-slate-100/50 rounded-md px-3 py-2">
           <button
             onClick={fixPairOrdering}
             disabled={fixPairsBusy}
-            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 text-xs px-3 py-1.5 rounded-md shrink-0"
+            className="bg-slate-300 hover:bg-slate-400 disabled:opacity-50 text-slate-800 text-xs px-3 py-1.5 rounded-md shrink-0"
           >
             Привести порядок имён в парах к единому виду
           </button>
-          {fixPairsResult && <span className="text-xs text-slate-400">{fixPairsResult}</span>}
+          {fixPairsResult && <span className="text-xs text-slate-600">{fixPairsResult}</span>}
         </div>
         {FORMATS.map((f) => (
           <div key={f.id} className="mb-5 last:mb-0">
             <div className="flex items-center justify-between mb-2">
-              <h4 className="text-sm text-slate-300 font-medium">{f.label}</h4>
+              <h4 className="text-sm text-slate-700 font-medium">{f.label}</h4>
               <div className="flex items-center gap-2">
                 <label className="text-xs text-slate-500">Публичный рейтинг с:</label>
                 <select
                   value={cutoffs[f.id] || ""}
                   onChange={(e) => saveCutoff(f.id, e.target.value || null)}
-                  className="bg-slate-900 border border-slate-700 rounded-md text-xs text-slate-200 px-2 py-1"
+                  className="bg-slate-100 border border-slate-300 rounded-md text-xs text-slate-800 px-2 py-1"
                 >
                   <option value="">— не задано —</option>
                   {(tournaments[f.id] || []).map((t) => (
@@ -1508,7 +1515,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
               </div>
             </div>
             {(tournaments[f.id] || []).length === 0 ? (
-              <p className="text-xs text-slate-600">Ещё нет турниров.</p>
+              <p className="text-xs text-slate-400">Ещё нет турниров.</p>
             ) : (
               <ol className="space-y-1">
                 {tournaments[f.id].map((t, idx) => (
@@ -1568,8 +1575,8 @@ function BackupPanel({ tournaments, cutoffs, roster, restoreAll }) {
   };
 
   return (
-    <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
-      <h3 className="text-slate-200 font-semibold mb-1">Бэкап всех данных</h3>
+    <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-5">
+      <h3 className="text-slate-800 font-semibold mb-1">Бэкап всех данных</h3>
       <p className="text-xs text-slate-500 mb-4">
         Скачайте JSON-файл со всеми турнирами, каталогом игроков и точками отсчёта — на случай сбоя
         или переноса на другую версию сайта. Импорт полностью заменяет текущие данные содержимым файла.
@@ -1577,15 +1584,15 @@ function BackupPanel({ tournaments, cutoffs, roster, restoreAll }) {
       <div className="flex flex-wrap items-center gap-3">
         <button
           onClick={doExport}
-          className="bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm px-4 py-2 rounded-md"
+          className="bg-slate-300 hover:bg-slate-400 text-slate-800 text-sm px-4 py-2 rounded-md"
         >
           Экспорт бэкапа
         </button>
-        <label className="bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm px-4 py-2 rounded-md cursor-pointer">
+        <label className="bg-slate-300 hover:bg-slate-400 text-slate-800 text-sm px-4 py-2 rounded-md cursor-pointer">
           Импортировать бэкап
           <input type="file" accept=".json" onChange={doImport} disabled={busy} className="hidden" />
         </label>
-        {message && <span className="text-xs text-slate-400">{message}</span>}
+        {message && <span className="text-xs text-slate-600">{message}</span>}
       </div>
     </div>
   );
@@ -1596,7 +1603,7 @@ function RosterPanel({ roster, addToRoster, removeFromRoster }) {
   const [newName, setNewName] = useState("");
   const [cleanupBusy, setCleanupBusy] = useState(false);
   const [cleanupMsg, setCleanupMsg] = useState(null);
-  const filtered = query ? roster.filter((n) => n.toLowerCase().includes(query.toLowerCase())) : roster;
+  const filtered = query ? roster.filter((n) => normalizeForSearch(n).includes(normalizeForSearch(query))) : roster;
   const garbageCount = roster.filter((n) => n.includes("/")).length;
 
   const cleanupGarbage = async () => {
@@ -1608,15 +1615,15 @@ function RosterPanel({ roster, addToRoster, removeFromRoster }) {
   };
 
   return (
-    <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5">
-      <h3 className="text-slate-200 font-semibold mb-1">Каталог игроков</h3>
+    <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-5">
+      <h3 className="text-slate-800 font-semibold mb-1">Каталог игроков</h3>
       <p className="text-xs text-slate-500 mb-4">
         Полные имена, по которым сайт расшифровывает фамилии в парных турнирах. Пополняется автоматически
         при импорте, можно добавить вручную.
       </p>
 
       {garbageCount > 0 && (
-        <div className="flex items-center gap-3 mb-3 bg-amber-950/30 border border-amber-800/40 rounded-md px-3 py-2">
+        <div className="flex items-center gap-3 mb-3 bg-amber-50 border border-amber-300 rounded-md px-3 py-2">
           <span className="text-xs text-amber-200 flex-1">
             В каталоге {garbageCount} "мусорных" записей с "/" (вероятно, парный турнир попал в соло) — их не должно быть.
           </span>
@@ -1637,11 +1644,11 @@ function RosterPanel({ roster, addToRoster, removeFromRoster }) {
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           placeholder="Добавить имя вручную, например: Иван Петров"
-          className="flex-1 bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-sm text-slate-100"
+          className="flex-1 bg-slate-100 border border-slate-300 rounded-md px-3 py-1.5 text-sm text-slate-900"
         />
         <button
           onClick={async () => { if (newName.trim()) { await addToRoster([newName.trim()]); setNewName(""); } }}
-          className="bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm px-3 py-1.5 rounded-md"
+          className="bg-slate-300 hover:bg-slate-400 text-slate-800 text-sm px-3 py-1.5 rounded-md"
         >
           Добавить
         </button>
@@ -1651,22 +1658,22 @@ function RosterPanel({ roster, addToRoster, removeFromRoster }) {
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder={`Поиск в каталоге (${roster.length})...`}
-        className="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-1.5 text-sm text-slate-100 mb-3"
+        className="w-full bg-slate-100 border border-slate-300 rounded-md px-3 py-1.5 text-sm text-slate-900 mb-3"
       />
-      <div className="max-h-40 overflow-y-auto text-sm text-slate-400 space-y-0.5">
+      <div className="max-h-40 overflow-y-auto text-sm text-slate-600 space-y-0.5">
         {filtered.map((n) => (
-          <div key={n} className="flex items-center justify-between group hover:bg-slate-900/40 rounded px-1">
-            <span className={n.includes("/") ? "text-amber-400" : ""}>{n}</span>
+          <div key={n} className="flex items-center justify-between group hover:bg-slate-100/40 rounded px-1">
+            <span className={n.includes("/") ? "text-amber-600" : ""}>{n}</span>
             <button
               onClick={() => removeFromRoster([n])}
-              className="text-slate-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+              className="text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
               title="Удалить из каталога"
             >
               <X size={13} />
             </button>
           </div>
         ))}
-        {filtered.length === 0 && <p className="text-slate-600">Ничего не найдено.</p>}
+        {filtered.length === 0 && <p className="text-slate-400">Ничего не найдено.</p>}
       </div>
     </div>
   );
@@ -1678,7 +1685,7 @@ function AdminGate({ onUnlock }) {
   return (
     <div className="max-w-sm mx-auto text-center py-16">
       <Lock className="mx-auto mb-4 text-slate-500" size={28} />
-      <p className="text-slate-400 text-sm mb-4">Введите код доступа к админке</p>
+      <p className="text-slate-600 text-sm mb-4">Введите код доступа к админке</p>
       <input
         type="password"
         value={code}
@@ -1689,7 +1696,7 @@ function AdminGate({ onUnlock }) {
             else setWrong(true);
           }
         }}
-        className="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-100 text-center mb-3"
+        className="w-full bg-slate-100 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-900 text-center mb-3"
         placeholder="код"
       />
       <button
@@ -1699,7 +1706,7 @@ function AdminGate({ onUnlock }) {
       >
         Войти
       </button>
-      {wrong && <p className="text-red-400 text-xs mt-3">Неверный код.</p>}
+      {wrong && <p className="text-red-600 text-xs mt-3">Неверный код.</p>}
     </div>
   );
 }
@@ -1710,7 +1717,7 @@ export default function RatingSite() {
   const [adminAuthed, setAdminAuthed] = useState(false);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-white text-slate-900">
       <div className="h-1" style={{ background: `linear-gradient(90deg, ${BRAND_BLUE}, ${BRAND_RED})` }} />
       <div className="max-w-3xl mx-auto px-4 py-8">
         <header className="flex flex-wrap items-center justify-between gap-3 mb-8">
@@ -1718,18 +1725,18 @@ export default function RatingSite() {
             <img src={LOGO_DATA_URI} alt="Водокачка" className="w-9 h-9 rounded-full shrink-0" />
             <h1 className="text-base sm:text-lg font-bold tracking-tight leading-tight">Чемпионат Водокачки <span className="text-slate-500">·</span> Рейтинг участников</h1>
           </div>
-          <div className="flex gap-1 bg-slate-900 rounded-lg p-1">
+          <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
             <button
               onClick={() => setTab("rating")}
               style={tab === "rating" ? { backgroundColor: BRAND_BLUE } : undefined}
-              className={`px-3 py-1.5 rounded-md text-sm flex items-center gap-1.5 ${tab === "rating" ? "text-white" : "text-slate-400 hover:text-slate-200"}`}
+              className={`px-3 py-1.5 rounded-md text-sm flex items-center gap-1.5 ${tab === "rating" ? "text-white" : "text-slate-600 hover:text-slate-800"}`}
             >
               <Trophy size={14} /> Рейтинг
             </button>
             <button
               onClick={() => setTab("matrix")}
               style={tab === "matrix" ? { backgroundColor: BRAND_BLUE } : undefined}
-              className={`px-3 py-1.5 rounded-md text-sm flex items-center gap-1.5 ${tab === "matrix" ? "text-white" : "text-slate-400 hover:text-slate-200"}`}
+              className={`px-3 py-1.5 rounded-md text-sm flex items-center gap-1.5 ${tab === "matrix" ? "text-white" : "text-slate-600 hover:text-slate-800"}`}
             >
               <Table size={14} /> Шахматка
             </button>
@@ -1746,7 +1753,7 @@ export default function RatingSite() {
           <div>
             <button
               onClick={() => setTab("rating")}
-              className="text-slate-500 hover:text-slate-300 text-sm mb-5 flex items-center gap-1"
+              className="text-slate-500 hover:text-slate-700 text-sm mb-5 flex items-center gap-1"
             >
               ← Назад к рейтингу
             </button>
@@ -1756,7 +1763,7 @@ export default function RatingSite() {
           <div>
             <button
               onClick={() => setTab("rating")}
-              className="text-slate-500 hover:text-slate-300 text-sm mb-5 flex items-center gap-1"
+              className="text-slate-500 hover:text-slate-700 text-sm mb-5 flex items-center gap-1"
             >
               ← Назад к рейтингу
             </button>
@@ -1765,10 +1772,10 @@ export default function RatingSite() {
         )}
 
         {tab !== "admin" && (
-          <div className="mt-16 pt-6 border-t border-slate-900 flex justify-center">
+          <div className="mt-16 pt-6 border-t border-slate-100 flex justify-center">
             <button
               onClick={() => setTab("admin")}
-              className="text-slate-700 hover:text-slate-400 text-xs flex items-center gap-1.5"
+              className="text-slate-300 hover:text-slate-600 text-xs flex items-center gap-1.5"
             >
               <Shield size={12} /> Админка
             </button>
