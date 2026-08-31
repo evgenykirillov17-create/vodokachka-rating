@@ -579,11 +579,14 @@ function RatingTable({ standings, query, onSelectPlayer }) {
     <div className="overflow-x-auto rounded-xl border border-slate-300/60">
       <table className="w-full text-sm">
         <thead>
-          <tr className="bg-slate-200/80 text-slate-700 text-left uppercase tracking-wide text-xs">
-            <th className="py-3 px-4 font-medium">#</th>
-            <th className="py-3 px-4 font-medium">Игрок</th>
-            <th className="py-3 px-4 font-medium text-right">Турниров</th>
-            <th className="py-3 px-4 font-medium text-right">Рейтинг</th>
+          <tr className="bg-slate-200/80 text-slate-700 text-left uppercase tracking-normal sm:tracking-wide text-xs">
+            <th className="py-3 pl-3 pr-1 sm:px-4 font-medium">#</th>
+            <th className="py-3 px-1 sm:px-4 font-medium">Игрок</th>
+            <th className="py-3 px-1 sm:px-4 font-medium text-right">
+              <span className="sm:hidden">Турн.</span>
+              <span className="hidden sm:inline">Турниров</span>
+            </th>
+            <th className="py-3 pl-1 pr-3 sm:px-4 font-medium text-right">Рейтинг</th>
           </tr>
         </thead>
         <tbody>
@@ -595,10 +598,10 @@ function RatingTable({ standings, query, onSelectPlayer }) {
                 onClick={() => onSelectPlayer(s.name)}
                 className={`border-t border-slate-200 cursor-pointer hover:bg-slate-200/60 transition-colors ${rank % 2 === 0 ? "bg-slate-100/10" : "bg-slate-100/40"} ${query ? "ring-1 ring-red-500/40" : ""}`}
               >
-                <td className="py-2.5 px-4"><MedalBadge rank={rank} /></td>
-                <td className="py-2.5 px-4 text-slate-900 font-medium">{s.name}</td>
-                <td className="py-2.5 px-4 text-right text-slate-600 tabular-nums">{s.tournamentsPlayed}</td>
-                <td className="py-2.5 px-4 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>{Math.round(s.avg)}</td>
+                <td className="py-2.5 pl-3 pr-1 sm:px-4"><MedalBadge rank={rank} /></td>
+                <td className="py-2.5 px-1 sm:px-4 text-slate-900 font-medium">{s.name}</td>
+                <td className="py-2.5 px-1 sm:px-4 text-right text-slate-600 tabular-nums">{s.tournamentsPlayed}</td>
+                <td className="py-2.5 pl-1 pr-3 sm:px-4 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>{Math.round(s.avg)}</td>
               </tr>
             );
           })}
@@ -637,9 +640,9 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
   const { totals, history } = detail;
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
-        className="bg-slate-100 border border-slate-300 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[85vh] overflow-y-auto"
+        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-lg max-h-[85vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between">
@@ -662,7 +665,7 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
             </div>
           ) : (
             <p className="text-sm text-slate-500 mb-2">
-              Подробной статистики (Ж/Н/П, голы) пока нет — эти турниры были перенесены только по итоговому %.
+              Подробной статистики (В/Н/П, голы) пока нет — эти турниры были перенесены только по итоговому рейтингу.
             </p>
           )}
 
@@ -672,14 +675,14 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
               <div key={i} className="bg-slate-200/50 rounded-lg px-3 py-2.5">
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-sm text-slate-800 font-medium">{h.tournamentName}</span>
-                  <span className="font-mono text-sm font-semibold" style={{ color: BRAND_RED }}>{Math.round(h.pct)}%</span>
+                  <span className="font-mono text-sm font-semibold" style={{ color: BRAND_RED }}>{Math.round(h.pct)}</span>
                 </div>
                 {h.hasStats ? (
                   <p className="text-xs text-slate-500">
                     {h.played} матчей · {h.wins}В-{h.draws}Н-{h.losses}П · голы {h.goalsFor}:{h.goalsAgainst}
                   </p>
                 ) : (
-                  <p className="text-xs text-slate-400">только итоговый %</p>
+                  <p className="text-xs text-slate-400">только итоговый рейтинг</p>
                 )}
               </div>
             ))}
@@ -732,6 +735,14 @@ function useSyncedHorizontalScroll(deps) {
   return { topRef, bottomRef, scrollWidth, onTopScroll, onBottomScroll };
 }
 
+// Разбивает "ЧВ37 (26.08.2026)" на строку 1 "ЧВ37" и строку 2 "26.08.2026" —
+// для компактного двухстрочного заголовка колонки в шахматке.
+function splitTournamentName(name) {
+  const m = String(name).match(/^(.*?)\s*\(([^)]*)\)\s*$/);
+  if (m) return { main: m[1], sub: m[2] };
+  return { main: name, sub: null };
+}
+
 function MatrixView({ tournaments, cutoffs }) {
   const [format, setFormat] = useState("solo");
   const list = tournaments[format] || [];
@@ -773,8 +784,7 @@ function MatrixView({ tournaments, cutoffs }) {
       </div>
 
       <p className="text-xs text-slate-500 mb-4">
-        % за каждый турнир по каждому игроку в формате «{FORMATS.find((f) => f.id === format)?.label}» —
-        тот же набор игроков, что и в публичном рейтинге.
+        Рейтинг с деталировкой по каждому турниру
       </p>
 
       {list.length === 0 || standings.length === 0 ? (
@@ -792,21 +802,27 @@ function MatrixView({ tournaments, cutoffs }) {
               <thead>
                 <tr className="bg-slate-200/80 text-slate-700 text-xs">
                   <th className="sticky left-0 bg-slate-200 z-10 px-3 py-2 text-left font-medium whitespace-nowrap">Игрок</th>
-                  <th className="px-3 py-2 text-right font-medium whitespace-nowrap">Турниров</th>
-                  {list.map((t) => (
-                    <th key={t.id} className="px-2 py-2 text-right font-medium whitespace-nowrap">{t.name}</th>
-                  ))}
+                  <th className="px-3 py-2 text-right font-medium whitespace-nowrap border-l border-slate-300">Турниров</th>
+                  {list.map((t) => {
+                    const { main, sub } = splitTournamentName(t.name);
+                    return (
+                      <th key={t.id} className="px-2 py-2 text-right font-medium border-l border-slate-300">
+                        <div className="whitespace-nowrap leading-tight">{main}</div>
+                        {sub && <div className="whitespace-nowrap leading-tight font-normal text-slate-500 text-[10px]">{sub}</div>}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
                 {standings.map((s, i) => (
                   <tr key={s.name} className={`border-t border-slate-200 ${i % 2 === 0 ? "bg-slate-100/10" : "bg-slate-100/40"}`}>
                     <td className="sticky left-0 bg-white px-3 py-1.5 text-slate-900 font-medium whitespace-nowrap">{s.name}</td>
-                    <td className="px-3 py-1.5 text-right text-slate-600 tabular-nums">{s.tournamentsPlayed}</td>
+                    <td className="px-3 py-1.5 text-right text-slate-600 tabular-nums border-l border-slate-200">{s.tournamentsPlayed}</td>
                     {list.map((t, idx) => {
                       const v = cellData[s.name]?.[idx];
                       return (
-                        <td key={t.id} className="px-2 py-1.5 text-right tabular-nums text-slate-700">
+                        <td key={t.id} className="px-2 py-1.5 text-right tabular-nums text-slate-700 border-l border-slate-200">
                           {v !== undefined ? Math.round(v) : ""}
                         </td>
                       );
@@ -834,6 +850,7 @@ function PublicView({ tournaments, cutoffs, isAdmin }) {
     if (effectiveMode === "last3") return computeLast3EditionsStandings(list, 3);
     return computeStandings(list, effectiveMode, cutoffs[format]);
   }, [list, effectiveMode, cutoffs, format]);
+  const cutoffTournament = list.find((t) => t.id === cutoffs[format]);
 
   return (
     <div>
@@ -889,11 +906,17 @@ function PublicView({ tournaments, cutoffs, isAdmin }) {
         />
       </div>
 
-      <p className="text-xs text-slate-500 mb-4">
+      <p className="text-xs text-slate-500 mb-1">
         {effectiveMode === "last3"
           ? `Топ-30 по среднему % за личные последние 3 турнира каждого — но только те, кто играл хотя бы в одном из последних 3 турниров формата «${FORMATS.find(f=>f.id===format)?.label}».`
-          : `Рейтинг — среднее % за последние 3 сыгранных турнира каждого игрока в формате «${FORMATS.find(f=>f.id===format)?.label}».`}
+          : "Очки рейтинга — это процент от максимально возможного количества набранных очков за один турнир. Рейтинг считается за 3 последних турнирах для каждого участника, чтобы отражать его актуальную форму."}
       </p>
+      {effectiveMode === "public" && cutoffTournament && (
+        <p className="text-xs text-slate-400 mb-4">
+          В рейтинге учитываются только участники начиная с турнира «{cutoffTournament.name}».
+        </p>
+      )}
+      {effectiveMode !== "public" && <div className="mb-4" />}
 
       <RatingTable standings={standings} query={query} onSelectPlayer={setSelectedPlayer} />
 
