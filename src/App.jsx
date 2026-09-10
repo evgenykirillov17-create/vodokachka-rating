@@ -635,14 +635,40 @@ function computePlayerDetail(tournaments, playerName) {
   return { totals, history };
 }
 
+// vh/dvh ненадёжны внутри вложенного <iframe> (сайт встроен в Tilda) — там они не
+// отслеживают появление/скрытие панели мобильного браузера так же, как в обычной вкладке.
+// Меряем реальную видимую высоту через JS и держим её в актуальном состоянии.
+function useViewportHeight() {
+  const [height, setHeight] = useState(() =>
+    typeof window !== "undefined" ? (window.visualViewport?.height || window.innerHeight) : 800
+  );
+  useEffect(() => {
+    const update = () => setHeight(window.visualViewport?.height || window.innerHeight);
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    window.visualViewport?.addEventListener("resize", update);
+    window.visualViewport?.addEventListener("scroll", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+      window.visualViewport?.removeEventListener("resize", update);
+      window.visualViewport?.removeEventListener("scroll", update);
+    };
+  }, []);
+  return height;
+}
+
 function PlayerDetailModal({ playerName, tournaments, onClose }) {
   const detail = useMemo(() => computePlayerDetail(tournaments, playerName), [tournaments, playerName]);
   const { totals, history } = detail;
+  const viewportHeight = useViewportHeight();
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
-        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-lg max-h-[85dvh] overflow-y-auto"
+        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-lg overflow-y-auto"
+        style={{ maxHeight: Math.round(viewportHeight * 0.85) }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between">
@@ -743,6 +769,19 @@ function splitTournamentName(name) {
   return { main: name, sub: null };
 }
 
+// Для пары "Имя1 Фамилия1/Имя2 Фамилия2" — делит на 2 строки, чтобы колонка с именем
+// в шахматке не занимала ширину суммы обоих имён, а только самого длинного из двух.
+function PlayerCellName({ name }) {
+  if (!name.includes("/")) return <span className="break-words">{name}</span>;
+  const [a, b] = name.split("/");
+  return (
+    <div className="leading-tight py-0.5">
+      <div className="break-words">{a}</div>
+      <div className="break-words">{b}</div>
+    </div>
+  );
+}
+
 function MatrixView({ tournaments, cutoffs }) {
   const [format, setFormat] = useState("solo");
   const list = tournaments[format] || [];
@@ -817,7 +856,9 @@ function MatrixView({ tournaments, cutoffs }) {
               <tbody>
                 {standings.map((s, i) => (
                   <tr key={s.name} className={`border-t border-slate-200 ${i % 2 === 0 ? "bg-slate-100/10" : "bg-slate-100/40"}`}>
-                    <td className="sticky left-0 bg-white px-3 py-1.5 text-slate-900 font-medium whitespace-nowrap">{s.name}</td>
+                    <td className="sticky left-0 bg-white px-3 py-1.5 text-slate-900 font-medium max-w-[150px]">
+                      <PlayerCellName name={s.name} />
+                    </td>
                     <td className="px-3 py-1.5 text-right text-slate-600 tabular-nums border-l border-slate-200">{s.tournamentsPlayed}</td>
                     {list.map((t, idx) => {
                       const v = cellData[s.name]?.[idx];
