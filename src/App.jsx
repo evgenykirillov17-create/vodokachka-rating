@@ -635,53 +635,27 @@ function computePlayerDetail(tournaments, playerName) {
   return { totals, history };
 }
 
-// vh/dvh ненадёжны внутри вложенного <iframe> (сайт встроен в Tilda) — там они не
-// отслеживают появление/скрытие панели мобильного браузера так же, как в обычной вкладке.
-// Меряем реальную видимую высоту через JS и держим её в актуальном состоянии.
-function useViewportHeight() {
-  const [height, setHeight] = useState(() =>
-    typeof window !== "undefined" ? (window.visualViewport?.height || window.innerHeight) : 800
-  );
-  useEffect(() => {
-    const update = () => setHeight(window.visualViewport?.height || window.innerHeight);
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("orientationchange", update);
-    window.visualViewport?.addEventListener("resize", update);
-    window.visualViewport?.addEventListener("scroll", update);
-    return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("orientationchange", update);
-      window.visualViewport?.removeEventListener("resize", update);
-      window.visualViewport?.removeEventListener("scroll", update);
-    };
-  }, []);
-  return height;
-}
-
 function PlayerDetailModal({ playerName, tournaments, onClose }) {
   const detail = useMemo(() => computePlayerDetail(tournaments, playerName), [tournaments, playerName]);
   const { totals, history } = detail;
-  const viewportHeight = useViewportHeight();
 
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
-        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-lg overflow-y-auto"
-        style={{ maxHeight: Math.round(viewportHeight * 0.85) }}
+        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-lg max-h-[90vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between">
+        <div className="shrink-0 bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between rounded-t-2xl">
           <h2 className="text-slate-900 font-semibold text-base">{playerName}</h2>
           <button onClick={onClose} className="text-slate-500 hover:text-slate-700">
             <X size={18} />
           </button>
         </div>
 
-        <div className="px-5 py-4">
+        <div className="px-5 py-4 shrink-0">
           <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2">Итого за все турниры</h3>
           {totals.hasStats ? (
-            <div className="grid grid-cols-3 gap-2 mb-2">
+            <div className="grid grid-cols-3 gap-2">
               <StatBox label="Матчей" value={totals.matches} />
               <StatBox label="Победы" value={totals.wins} accent="text-green-600" />
               <StatBox label="Ничьи" value={totals.draws} />
@@ -690,13 +664,19 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
               <StatBox label="Голы пропущено" value={totals.goalsAgainst} />
             </div>
           ) : (
-            <p className="text-sm text-slate-500 mb-2">
+            <p className="text-sm text-slate-500">
               Подробной статистики (В/Н/П, голы) пока нет — эти турниры были перенесены только по итоговому рейтингу.
             </p>
           )}
+        </div>
 
-          <h3 className="text-xs uppercase tracking-wide text-slate-500 mt-5 mb-2">По турнирам</h3>
-          <div className="space-y-2">
+        {/* Скроллится только сам список турниров — у него своя небольшая
+            фиксированная высота, которая гарантированно помещается на экране
+            целиком, независимо от панели браузера (внешняя модалка при этом
+            не растягивается на весь экран и не упирается в неё). */}
+        <div className="px-5 pb-5 flex flex-col min-h-0">
+          <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2 shrink-0">По турнирам</h3>
+          <div className="space-y-2 overflow-y-auto max-h-64 pr-1">
             {history.map((h, i) => (
               <div key={i} className="bg-slate-200/50 rounded-lg px-3 py-2.5">
                 <div className="flex items-center justify-between mb-1">
