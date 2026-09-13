@@ -36,6 +36,29 @@ function sheetToRows(ws) {
   return XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
 }
 
+// Как sheetToRows, но "чистит" объединённые ячейки: SheetJS иногда размножает значение
+// объединённой ячейки на все строки/столбцы, которые она перекрывает (а не только на
+// главную, левую верхнюю) — из-за этого декоративная строка под матчем (где выведено
+// название клуба, а голы объединены с реальной строкой матча выше) может ошибочно
+// выглядеть как ещё один сыгранный матч. Используется только в разборе старых форматов
+// для довнесения статистики — на "живой" импорт турниров не влияет.
+function sheetToRowsNoMergeDupes(ws) {
+  const rows = sheetToRows(ws);
+  if (!ws["!merges"] || !ws["!ref"]) return rows;
+  const range = XLSX.utils.decode_range(ws["!ref"]);
+  ws["!merges"].forEach((merge) => {
+    for (let r = merge.s.r; r <= merge.e.r; r++) {
+      for (let c = merge.s.c; c <= merge.e.c; c++) {
+        if (r === merge.s.r && c === merge.s.c) continue; // главная ячейка — не трогаем
+        const arrR = r - range.s.r;
+        const arrC = c - range.s.c;
+        if (rows[arrR] && arrC >= 0) rows[arrR][arrC] = null;
+      }
+    }
+  });
+  return rows;
+}
+
 function findHeaderRow(rows, required) {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i] || [];
@@ -254,6 +277,306 @@ function computeO(p) {
   if (p.reachedLCH) o += 4;
   return o;
 }
+
+// ---------- ИСТОРИЧЕСКИЕ ФОРМАТЫ (для довнесения статистики в уже импортированные турниры) ----------
+
+// Формат A: листы "Ввод" (состав игрок/команда + матчи группы), "Плей-офф" (все сетки,
+// Общие помощники для "командных" исторических форматов: собрать все матчи со счётом
+// из листа (по названиям столбцов, независимо от того, сколько раз заголовок повторяется
+// на листе — секции/раунды пропускаются сами, там просто нет чисел в нужных колонках),
+// и свернуть их в статистику по каждой команде.
+function collectScoredMatches(rows, col, headers) {
+  const h = headers || { t1: "Команда 1", g1: "Гол 1", g2: "Гол 2", t2: "Команда 2" };
+  const matches = [];
+  for (let r = 0; r < rows.length; r++) {
+    const row = rows[r];
+    const t1 = row[col[h.t1]];
+    const g1 = row[col[h.g1]];
+    const g2 = row[col[h.g2]];
+    const t2 = row[col[h.t2]];
+    if (t1 && t2 && typeof g1 === "number" && typeof g2 === "number") {
+      matches.push([String(t1).trim(), g1, g2, String(t2).trim()]);
+    }
+  }
+  return matches;
+}
+
+function tallyTeamStats(matches) {
+  const teamStats = {};
+  const ensure = (t) => (teamStats[t] = teamStats[t] || { played: 0, wins: 0, draws: 0, losses: 0, gf: 0, ga: 0 });
+  matches.forEach(([t1, g1, g2, t2]) => {
+    const s1 = ensure(t1), s2 = ensure(t2);
+    s1.played++; s2.played++;
+    s1.gf += g1; s1.ga += g2;
+    s2.gf += g2; s2.ga += g1;
+    if (g1 > g2) { s1.wins++; s2.losses++; }
+    else if (g1 < g2) { s2.wins++; s1.losses++; }
+    else { s1.draws++; s2.draws++; }
+  });
+  return teamStats;
+}
+
+function buildLegacyRows(teamStats, playerOfTeam) {
+  const rows = Object.keys(teamStats).map((team) => {
+    const s = teamStats[team];
+    const name = playerOfTeam[team] || null;
+    return {
+      name: name || `⚠️ ${team}`,
+      team,
+      unresolved: !name,
+      played: s.played, wins: s.wins, draws: s.draws, losses: s.losses,
+      goalsFor: s.gf, goalsAgainst: s.ga,
+    };
+  });
+  rows.sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  return rows;
+}
+
+// Формат A: листы "Ввод" (состав игрок/команда + матчи группы), "Плей-офф" (все сетки,
+// каждый раунд — 2 ноги). Игроки закреплены за клубами, а не фигурируют в матчах напрямую.
+// Мы НЕ считаем очки/рейтинг для этого формата — только сырые В/Н/П/голы по каждому матчу
+// (обе ноги считаются отдельными матчами), которые потом накладываются на уже существующий
+// турнир (у него % уже посчитан через обычный импорт истории).
+function parseLegacyFormatA(wb) {
+  const wsIn = wb.Sheets["Ввод"];
+  const wsPo = wb.Sheets["Плей-офф"];
+  if (!wsIn) throw new Error('Не найден лист "Ввод"');
+  if (!wsPo) throw new Error('Не найден лист "Плей-офф"');
+
+  const rowsIn = sheetToRows(wsIn);
+
+  const matchHeaderIdx = findHeaderRow(rowsIn, ["Команда 1", "Гол 1", "Гол 2", "Команда 2"]);
+  if (matchHeaderIdx === -1) throw new Error('На листе "Ввод" не найдена строка заголовков матчей');
+  const matchCol = indexHeaders(rowsIn[matchHeaderIdx]);
+
+  let playerHeaderIdx = -1;
+  for (let i = 0; i < rowsIn.length; i++) {
+    if (rowsIn[i][0] === "№" && rowsIn[i][1] === "Команда") { playerHeaderIdx = i; break; }
+  }
+  if (playerHeaderIdx === -1) throw new Error('На листе "Ввод" не найдена строка заголовков состава (№/Команда)');
+
+  const playerOfTeam = {};
+  const skippedTeams = [];
+  for (let r = playerHeaderIdx + 1; r < rowsIn.length; r++) {
+    const row = rowsIn[r];
+    const name = row[0];
+    const team = row[1] ? String(row[1]).trim() : row[1];
+    if (!team) continue;
+    if (!name || String(name).trim() === "-" || String(name).trim() === "") {
+      skippedTeams.push(team);
+      continue;
+    }
+    playerOfTeam[team] = normalizeName(String(name).trim());
+  }
+
+  let matches = collectScoredMatches(rowsIn, matchCol);
+
+  const rowsPo = sheetToRows(wsPo);
+  const poHeaderIdx = findHeaderRow(rowsPo, ["Команда 1", "Гол 1", "Гол 2", "Команда 2"]);
+  if (poHeaderIdx === -1) throw new Error('На листе "Плей-офф" не найдена строка заголовков матчей');
+  const poCol = indexHeaders(rowsPo[poHeaderIdx]);
+  matches = matches.concat(collectScoredMatches(rowsPo, poCol));
+
+  const teamStats = tallyTeamStats(matches);
+  const rows = buildLegacyRows(teamStats, playerOfTeam);
+  return { rows, skippedTeams };
+}
+
+// Формат B: листы "Команды" (состав, игроки через "+"), "Расписание" (матчи группы,
+// один круг), "Плей-офф" (сетки, по 1 матчу на раунд — структура столбцов как в формате A).
+function parseLegacyFormatB(wb) {
+  const wsTeams = wb.Sheets["Команды"];
+  const wsSchedule = wb.Sheets["Расписание"];
+  const wsPo = wb.Sheets["Плей-офф"];
+  if (!wsTeams) throw new Error('Не найден лист "Команды"');
+  if (!wsSchedule) throw new Error('Не найден лист "Расписание"');
+  if (!wsPo) throw new Error('Не найден лист "Плей-офф"');
+
+  const rowsTeams = sheetToRows(wsTeams);
+  const teamsHeaderIdx = findHeaderRow(rowsTeams, ["Участники", "Команда"]);
+  if (teamsHeaderIdx === -1) throw new Error('На листе "Команды" не найдена строка заголовков (Участники/Команда)');
+  const teamsCol = indexHeaders(rowsTeams[teamsHeaderIdx]);
+
+  const playerOfTeam = {};
+  const skippedTeams = [];
+  for (let r = teamsHeaderIdx + 1; r < rowsTeams.length; r++) {
+    const row = rowsTeams[r];
+    const participants = row[teamsCol["Участники"]];
+    const team = row[teamsCol["Команда"]] ? String(row[teamsCol["Команда"]]).trim() : row[teamsCol["Команда"]];
+    if (!team) continue;
+    if (!participants || String(participants).trim() === "-" || String(participants).trim() === "") {
+      skippedTeams.push(team);
+      continue;
+    }
+    // "Илья+Женя" -> "Илья/Женя" — приводим к тому же разделителю, что и пары на сайте
+    // (полные имена всё равно впишет админ вручную в превью, это лишь черновой вид).
+    playerOfTeam[team] = normalizeName(String(participants).trim()).replace(/\s*\+\s*/g, "/");
+  }
+
+  const rowsSchedule = sheetToRows(wsSchedule);
+  const scheduleHeaderIdx = findHeaderRow(rowsSchedule, ["Команда 1", "Гол 1", "Гол 2", "Команда 2"]);
+  if (scheduleHeaderIdx === -1) throw new Error('На листе "Расписание" не найдена строка заголовков матчей');
+  const scheduleCol = indexHeaders(rowsSchedule[scheduleHeaderIdx]);
+  let matches = collectScoredMatches(rowsSchedule, scheduleCol);
+
+  const rowsPo = sheetToRows(wsPo);
+  const poHeaderIdx = findHeaderRow(rowsPo, ["Команда 1", "Гол 1", "Гол 2", "Команда 2"]);
+  if (poHeaderIdx === -1) throw new Error('На листе "Плей-офф" не найдена строка заголовков матчей');
+  const poCol = indexHeaders(rowsPo[poHeaderIdx]);
+  matches = matches.concat(collectScoredMatches(rowsPo, poCol));
+
+  const teamStats = tallyTeamStats(matches);
+  const rows = buildLegacyRows(teamStats, playerOfTeam);
+  return { rows, skippedTeams };
+}
+
+// Формат C: листы "Расписание группы" + "Расписание плей-офф". Игроки фигурируют в матчах
+// НАПРЯМУЮ (столбцы "Игрок 1"/"Игрок 2"), без привязки через клуб/команду — самый простой
+// случай, привязка "игрок -> игрок" тождественная.
+function parseLegacyFormatC(wb) {
+  const headers = { t1: "Игрок 1", g1: "Гол 1", g2: "Гол 2", t2: "Игрок 2" };
+  const required = ["Игрок 1", "Гол 1", "Гол 2", "Игрок 2"];
+
+  // Берём только листы, где по НАЗВАНИЮ ожидаем реальный список матчей ("Расписание..."/
+  // "Распис..." — название сокращают по-разному в разных файлах, поэтому ищем по подстроке
+  // "расп"). НЕ берём "Личные встречи", "Итог..." и подобные — на разных файлах это либо
+  // просто повторяет те же самые матчи ещё раз в другом виде (было задвоение), либо просто
+  // не совпадает по названию — подстрока "расп" сама по себе уже отсекает такие листы.
+  // Исключение — если для плей-офф вообще нет отдельного "расп"-листа (как в паре файлов,
+  // где итоги плей-офф лежат только на листе "Итог плей-офф") — тогда он единственный
+  // источник, и его нужно подключить как запасной вариант.
+  const raspSheetNames = wb.SheetNames.filter((name) => name.toLowerCase().includes("расп"));
+  const raspHasPlayoff = raspSheetNames.some((name) => name.toLowerCase().includes("плей"));
+  let sourceSheetNames = raspSheetNames;
+  if (!raspHasPlayoff && wb.SheetNames.includes("Итог плей-офф")) {
+    sourceSheetNames = sourceSheetNames.concat(["Итог плей-офф"]);
+  }
+  if (sourceSheetNames.length === 0) {
+    throw new Error('Не найдено листов с расписанием матчей (название содержит "расп") или "Итог плей-офф"');
+  }
+
+  let matches = [];
+  let sheetsUsed = 0;
+  sourceSheetNames.forEach((sheetName) => {
+    const ws = wb.Sheets[sheetName];
+    const rows = sheetToRowsNoMergeDupes(ws);
+    const headerIdx = findHeaderRow(rows, required);
+    if (headerIdx !== -1) {
+      const col = indexHeaders(rows[headerIdx]);
+      matches = matches.concat(collectScoredMatches(rows, col, headers));
+      sheetsUsed++;
+      return;
+    }
+    // Запасной вариант: на некоторых листах плей-офф вообще нет строки заголовков —
+    // данные лежат в фиксированных столбцах (C/D/E/F = Игрок1/Гол1/Гол2/Игрок2, блоками
+    // "раунд / матч / команды"). Названия таких листов слишком разные, чтобы перечислять
+    // все варианты ("плей-офф", "ЛЧ", "ЛЕ", "кубок"...) — поэтому не завязываемся на
+    // название, а страхуемся фильтром по содержимому: настоящее имя игрока/пары не может
+    // быть однобуквенным или голым числом (а вспомогательные листы жеребьёвки иногда дают
+    // именно такие "матчи" по случайному совпадению чисел в нужных позициях).
+    //
+    // ВАЖНО: столбцы C/D/E/F считаем по НАСТОЯЩЕМУ адресу листа (через !ref), а не по
+    // индексу в массиве после sheet_to_json — если колонка A на листе пустая, SheetJS
+    // обрезает её и все номера столбцов "уезжают" на один влево (та же ловушка, что была
+    // с листом "0_Настройки" в самом начале).
+    const range = ws["!ref"] ? XLSX.utils.decode_range(ws["!ref"]) : { s: { c: 0 } };
+    const offset = range.s.c; // 0, если лист начинается с колонки A; >0, если она пустая и обрезана
+    const ABS = { t1: 2, g1: 3, g2: 4, t2: 5 }; // столбцы C, D, E, F (0 = A)
+    const relCol = { t1: ABS.t1 - offset, g1: ABS.g1 - offset, g2: ABS.g2 - offset, t2: ABS.t2 - offset };
+    const fixed = collectScoredMatches(rows, relCol, { t1: "t1", g1: "g1", g2: "g2", t2: "t2" }).filter(
+      ([t1, , , t2]) => t1.length > 1 && t2.length > 1 && !/^\d+$/.test(t1) && !/^\d+$/.test(t2)
+    );
+    if (fixed.length > 0) {
+      matches = matches.concat(fixed);
+      sheetsUsed++;
+    }
+  });
+  if (sheetsUsed === 0) {
+    throw new Error('На листах со списком матчей не найдена строка заголовков "Игрок 1"/"Гол 1"/"Гол 2"/"Игрок 2"');
+  }
+
+  const playerStats = tallyTeamStats(matches);
+  const identity = {};
+  Object.keys(playerStats).forEach((name) => { identity[name] = normalizeName(name); });
+  const rows = buildLegacyRows(playerStats, identity);
+  return { rows, skippedTeams: [] };
+}
+
+// Формат D: листы, где есть столбцы "Пара 1"/"Пара 2" (сами заголовки голов называются
+// по-разному в разных листах одного и того же файла — то единым "Счет" на 2 ячейки, то
+// "Г1"/"Г2" — поэтому берём их не по названию, а по положению: сразу после "Пара 1" идут
+// голы первой и второй пары, затем сама "Пара 2"). Имя пары иногда записано вместе с
+// декоративным названием "команды" через перенос строки ("Оськин/Иванов\nСборная АПЛ") —
+// берём только первую строчку.
+function parseLegacyFormatD(wb) {
+  const sourceSheetNames = wb.SheetNames.filter((name) => {
+    const rows = sheetToRowsNoMergeDupes(wb.Sheets[name]);
+    return rows.some((row) => row && row.includes("Пара 1") && row.includes("Пара 2"));
+  });
+  if (sourceSheetNames.length === 0) {
+    throw new Error('Не найдено листов со столбцами "Пара 1"/"Пара 2"');
+  }
+
+  let matches = [];
+  let sheetsUsed = 0;
+  sourceSheetNames.forEach((sheetName) => {
+    const rows = sheetToRowsNoMergeDupes(wb.Sheets[sheetName]);
+    const headerIdx = rows.findIndex((row) => row && row.includes("Пара 1") && row.includes("Пара 2"));
+    if (headerIdx === -1) return;
+    const pairCol = rows[headerIdx].indexOf("Пара 1");
+    const g1Col = pairCol + 1, g2Col = pairCol + 2, pair2Col = pairCol + 3;
+    for (let r = headerIdx + 1; r < rows.length; r++) {
+      const row = rows[r];
+      let t1 = row[pairCol];
+      const g1 = row[g1Col];
+      const g2 = row[g2Col];
+      let t2 = row[pair2Col];
+      if (t1 && t2 && typeof g1 === "number" && typeof g2 === "number") {
+        t1 = String(t1).split("\n")[0].trim();
+        t2 = String(t2).split("\n")[0].trim();
+        matches.push([t1, g1, g2, t2]);
+      }
+    }
+    sheetsUsed++;
+  });
+  if (sheetsUsed === 0) {
+    throw new Error('На листах не найдена строка заголовков "Пара 1"/"Пара 2"');
+  }
+
+  const playerStats = tallyTeamStats(matches);
+  const identity = {};
+  Object.keys(playerStats).forEach((name) => { identity[name] = normalizeName(name); });
+  const rows = buildLegacyRows(playerStats, identity);
+  return { rows, skippedTeams: [] };
+}
+
+// Современный формат ("0_Настройки"/"1_Участники"/"2_Расписание"/"3_Таблица"/
+// "4_Плей-офф расписание"/"5_Сетка плей-офф") — тот же самый парсер, что используется в
+// обычном "Импорте турнира" (parseTournamentFile), он уже считает и статистику, и %.
+// Здесь берём из него только В/Н/П/голы для довнесения в уже существующую запись турнира —
+// % оставляем прежним (не трогаем), как и для остальных исторических форматов, чтобы не
+// создавать дублирующую запись турнира через обычный импорт.
+function parseModernFormatForBackfill(wb) {
+  const parsed = parseTournamentFile(wb);
+  const rows = parsed.rows.map((r) => ({
+    name: r.name,
+    played: r.played,
+    wins: r.wins,
+    draws: r.draws,
+    losses: r.losses,
+    goalsFor: r.goalsFor,
+    goalsAgainst: r.goalsAgainst,
+  }));
+  return { rows, skippedTeams: [] };
+}
+
+const LEGACY_FORMATS = [
+  { id: "formatA", label: "Формат A — команды/клубы, 2 матча в раунде (листы «Ввод», «Плей-офф») — например, ЧВ2", parser: parseLegacyFormatA },
+  { id: "formatB", label: "Формат B — пары через «+», 1 матч в раунде (листы «Команды», «Расписание», «Плей-офф») — например, ЧВ3", parser: parseLegacyFormatB },
+  { id: "formatC", label: "Формат C — игроки напрямую в матчах (листы «Расписание группы», «Расписание плей-офф») — большинство турниров ЧВ4–ЧВ17, ЧВ19–ЧВ26, SE1, SE2", parser: parseLegacyFormatC },
+  { id: "formatD", label: "Формат D — столбцы «Пара 1»/«Пара 2» (листы «Расписание», «Плей-офф») — например, ЧВ18", parser: parseLegacyFormatD },
+  { id: "modern", label: "Современный формат (0_Настройки/1_Участники/... — как в обычном импорте турнира) — начиная с ЧВ27", parser: parseModernFormatForBackfill },
+];
 
 function parseTournamentFile(wb) {
   const { G, vsSize } = readSettings(wb);
@@ -1105,7 +1428,142 @@ function HistoryImport({ tournaments, saveTournaments, addToRoster }) {
   );
 }
 
-function TournamentRow({ index, tournament, onRename, onRemove }) {
+// Полное редактирование содержимого уже сохранённого турнира — имена, В/Н/П, голы,
+// итоговый % за турнир — всё в одной таблице, открывается по клику на название турнира
+// в списке. Можно и удалять/добавлять игроков вручную.
+function TournamentEditModal({ tournament, onClose, onSave }) {
+  const [rows, setRows] = useState(() => tournament.rows.map((r) => ({ ...r })));
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { window.scrollTo(0, 0); }, []);
+
+  const updateField = (idx, field, value) => {
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
+  };
+  const removeRow = (idx) => setRows((prev) => prev.filter((_, i) => i !== idx));
+  const addRow = () => setRows((prev) => [
+    ...prev,
+    { name: "", played: 0, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0, pct: 0, O: null, norm: null },
+  ]);
+
+  const save = async () => {
+    setBusy(true);
+    const cleaned = rows
+      .filter((r) => r.name && String(r.name).trim())
+      .map((r) => {
+        const numOrNull = (v) => (v === null || v === "" || v === undefined ? null : Number(v));
+        return {
+          ...r,
+          name: String(r.name).trim(),
+          played: Number(r.played) || 0,
+          wins: numOrNull(r.wins),
+          draws: numOrNull(r.draws),
+          losses: numOrNull(r.losses),
+          goalsFor: numOrNull(r.goalsFor),
+          goalsAgainst: numOrNull(r.goalsAgainst),
+          pct: Number(r.pct) || 0,
+        };
+      });
+    await onSave(cleaned);
+    setBusy(false);
+    onClose();
+  };
+
+  const numField = (idx, field, width = "w-12") => (
+    <input
+      type="number"
+      value={rows[idx][field] === null || rows[idx][field] === undefined ? "" : rows[idx][field]}
+      onChange={(e) => updateField(idx, field, e.target.value === "" ? null : Number(e.target.value))}
+      className={`${width} bg-white border border-slate-300 rounded px-1 py-1 text-xs text-right`}
+    />
+  );
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-start justify-center z-50 p-2 sm:p-4 overflow-y-auto" onClick={onClose}>
+      <div
+        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-3xl shrink-0"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between rounded-t-2xl">
+          <h2 className="text-slate-900 font-semibold text-base truncate pr-3">Редактирование: {tournament.name}</h2>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-700 shrink-0">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-4">
+          <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-slate-300">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-200 text-slate-600 sticky top-0">
+                <tr>
+                  <th className="w-6"></th>
+                  <th className="text-left py-2 px-2">Имя</th>
+                  <th className="text-right py-2 px-1">Игр</th>
+                  <th className="text-right py-2 px-1">В</th>
+                  <th className="text-right py-2 px-1">Н</th>
+                  <th className="text-right py-2 px-1">П</th>
+                  <th className="text-right py-2 px-1">ГЗ</th>
+                  <th className="text-right py-2 px-1">ГП</th>
+                  <th className="text-right py-2 px-2">%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} className="border-t border-slate-200">
+                    <td className="text-center">
+                      <button onClick={() => removeRow(i)} className="text-slate-400 hover:text-red-500" title="Удалить игрока">
+                        <X size={12} />
+                      </button>
+                    </td>
+                    <td className="py-1 px-2">
+                      <input
+                        value={r.name}
+                        onChange={(e) => updateField(i, "name", e.target.value)}
+                        className="w-full bg-white border border-slate-300 rounded px-1.5 py-1 text-xs"
+                      />
+                    </td>
+                    <td className="py-1 px-1">{numField(i, "played")}</td>
+                    <td className="py-1 px-1">{numField(i, "wins")}</td>
+                    <td className="py-1 px-1">{numField(i, "draws")}</td>
+                    <td className="py-1 px-1">{numField(i, "losses")}</td>
+                    <td className="py-1 px-1">{numField(i, "goalsFor")}</td>
+                    <td className="py-1 px-1">{numField(i, "goalsAgainst")}</td>
+                    <td className="py-1 px-2">
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={r.pct}
+                        onChange={(e) => updateField(i, "pct", e.target.value === "" ? "" : Number(e.target.value))}
+                        className="w-16 bg-white border border-slate-300 rounded px-1 py-1 text-xs text-right font-semibold"
+                        style={{ color: BRAND_RED }}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 mt-3">
+            <button onClick={addRow} className="bg-slate-300 hover:bg-slate-400 text-slate-800 text-xs px-3 py-1.5 rounded-md">
+              + Добавить игрока
+            </button>
+            <button
+              onClick={save}
+              disabled={busy}
+              style={{ backgroundColor: BRAND_RED }}
+              className="hover:brightness-110 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-md"
+            >
+              Сохранить изменения
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TournamentRow({ index, tournament, onRename, onRemove, onEditContents }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(tournament.name);
 
@@ -1137,9 +1595,9 @@ function TournamentRow({ index, tournament, onRename, onRemove }) {
         </div>
       ) : (
         <>
-          <span className="text-slate-700 truncate">
+          <button onClick={onEditContents} className="text-slate-700 truncate text-left hover:underline" title="Открыть и отредактировать содержимое турнира">
             <span className="text-slate-400 tabular-nums mr-2">{index + 1}.</span>{tournament.name}
-          </span>
+          </button>
           <div className="flex items-center gap-2 shrink-0">
             <button onClick={() => setEditing(true)} className="text-slate-400 hover:text-slate-700" title="Переименовать">
               <Pencil size={13} />
@@ -1304,6 +1762,17 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
     await saveTournaments(fmt, updated);
   };
 
+  const [editingTournament, setEditingTournament] = useState(null); // { format, id } | null
+  const editingTournamentObj = editingTournament
+    ? (tournaments[editingTournament.format] || []).find((t) => t.id === editingTournament.id)
+    : null;
+
+  const saveTournamentContents = async (newRows) => {
+    const { format, id } = editingTournament;
+    const updated = (tournaments[format] || []).map((t) => (t.id === id ? { ...t, rows: newRows } : t));
+    await saveTournaments(format, updated);
+  };
+
   const [fixBusy, setFixBusy] = useState(false);
   const [fixResult, setFixResult] = useState(null);
 
@@ -1368,6 +1837,8 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
       <BackupPanel tournaments={tournaments} cutoffs={cutoffs} roster={roster} restoreAll={restoreAll} />
 
       <HistoryImport tournaments={tournaments} saveTournaments={saveTournaments} addToRoster={addToRoster} />
+
+      <LegacyStatsImport tournaments={tournaments} saveTournaments={saveTournaments} addToRoster={addToRoster} />
 
       <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-5">
         <h3 className="text-slate-800 font-semibold mb-4 flex items-center gap-2">
@@ -1570,7 +2041,14 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
             ) : (
               <ol className="space-y-1">
                 {tournaments[f.id].map((t, idx) => (
-                  <TournamentRow key={t.id} index={idx} tournament={t} onRename={(newName) => renameTournament(f.id, t.id, newName)} onRemove={() => removeTournament(f.id, t.id)} />
+                  <TournamentRow
+                    key={t.id}
+                    index={idx}
+                    tournament={t}
+                    onRename={(newName) => renameTournament(f.id, t.id, newName)}
+                    onRemove={() => removeTournament(f.id, t.id)}
+                    onEditContents={() => setEditingTournament({ format: f.id, id: t.id })}
+                  />
                 ))}
               </ol>
             )}
@@ -1579,6 +2057,241 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
       </div>
 
       <RosterPanel roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} />
+
+      {editingTournamentObj && (
+        <TournamentEditModal
+          tournament={editingTournamentObj}
+          onClose={() => setEditingTournament(null)}
+          onSave={saveTournamentContents}
+        />
+      )}
+    </div>
+  );
+}
+
+function LegacyStatsImport({ tournaments, saveTournaments, addToRoster }) {
+  const [format, setFormat] = useState("solo");
+  const [tournamentId, setTournamentId] = useState("");
+  const [legacyFormatId, setLegacyFormatId] = useState(LEGACY_FORMATS[0].id);
+  const [rows, setRows] = useState(null); // редактируемые строки превью
+  const [skippedTeams, setSkippedTeams] = useState([]);
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const list = tournaments[format] || [];
+  const targetTournament = list.find((t) => t.id === tournamentId);
+  const existingNames = useMemo(() => new Set((targetTournament?.rows || []).map((r) => r.name)), [targetTournament]);
+
+  const handleFile = async (e) => {
+    const f = e.target.files?.[0];
+    setError(null);
+    setSuccess(null);
+    setRows(null);
+    if (!f) return;
+    if (!tournamentId) {
+      setError("Сначала выберите, к какому уже сохранённому турниру относится этот файл.");
+      e.target.value = "";
+      return;
+    }
+    setBusy(true);
+    try {
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const legacyFormat = LEGACY_FORMATS.find((l) => l.id === legacyFormatId);
+      const parsed = legacyFormat.parser(wb);
+      setRows(parsed.rows);
+      setSkippedTeams(parsed.skippedTeams);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateRow = (idx, field, value) => {
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
+  };
+
+  const confirmSave = async () => {
+    if (!rows || !targetTournament) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const statsByName = {};
+      rows.forEach((r) => {
+        statsByName[r.name] = {
+          played: Number(r.played) || 0,
+          wins: Number(r.wins) || 0,
+          draws: Number(r.draws) || 0,
+          losses: Number(r.losses) || 0,
+          goalsFor: Number(r.goalsFor) || 0,
+          goalsAgainst: Number(r.goalsAgainst) || 0,
+        };
+      });
+
+      const existingRows = targetTournament.rows.map((r) => {
+        const s = statsByName[r.name];
+        if (!s) return r;
+        delete statsByName[r.name];
+        return { ...r, ...s };
+      });
+      // Игроки из файла, которых не было среди уже сохранённых (новые записи) — добавляем как есть,
+      // без %, так как рейтинга за этот турнир у них не было в исходном импорте истории.
+      const newRows = Object.keys(statsByName).map((name) => ({
+        name, pct: 0, O: null, norm: null, ...statsByName[name],
+      }));
+      const finalRows = [...existingRows, ...newRows];
+
+      const updatedTournaments = list.map((t) => (t.id === tournamentId ? { ...t, rows: finalRows } : t));
+      await saveTournaments(format, updatedTournaments);
+      await addToRoster(rows.filter((r) => !r.unresolved).map((r) => r.name));
+
+      setSuccess(`Статистика добавлена в «${targetTournament.name}»: обновлено ${finalRows.length - newRows.length}, добавлено новых ${newRows.length}.`);
+      setRows(null);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="bg-slate-100 border border-slate-300 rounded-xl p-5">
+      <h3 className="text-slate-900 font-semibold mb-1">Довнесение статистики старых турниров</h3>
+      <p className="text-xs text-slate-500 mb-4">
+        Для турниров, которые уже есть на сайте только с итоговым %, — загрузите исходный файл турнира,
+        чтобы добавить В/Н/П и голы. Сам % за турнир при этом не меняется.
+      </p>
+
+      <div className="grid sm:grid-cols-2 gap-3 mb-3">
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Формат</label>
+          <div className="flex gap-2">
+            {FORMATS.map((f) => (
+              <button
+                key={f.id}
+                onClick={() => { setFormat(f.id); setTournamentId(""); setRows(null); }}
+                style={format === f.id ? { backgroundColor: BRAND_BLUE } : undefined}
+                className={`px-3 py-1.5 rounded-md text-sm ${format === f.id ? "text-white font-medium" : "bg-slate-300 text-slate-700 hover:bg-slate-400"}`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Какой турнир пополняем</label>
+          <select
+            value={tournamentId}
+            onChange={(e) => { setTournamentId(e.target.value); setRows(null); }}
+            className="w-full bg-white border border-slate-300 rounded-md text-sm text-slate-800 px-2 py-1.5"
+          >
+            <option value="">— выберите турнир —</option>
+            {list.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="mb-3">
+        <label className="block text-xs text-slate-500 mb-1">Тип файла (структура старой таблицы)</label>
+        <select
+          value={legacyFormatId}
+          onChange={(e) => setLegacyFormatId(e.target.value)}
+          className="w-full bg-white border border-slate-300 rounded-md text-sm text-slate-800 px-2 py-1.5"
+        >
+          {LEGACY_FORMATS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+        </select>
+      </div>
+
+      <input
+        type="file"
+        accept=".xlsx"
+        onChange={handleFile}
+        disabled={!tournamentId || busy}
+        className="block w-full text-sm text-slate-700 mb-4 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-slate-300 file:text-slate-800 file:text-sm hover:file:bg-slate-400 disabled:opacity-50"
+      />
+
+      {error && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-300 text-red-700 text-sm rounded-md p-3 mb-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+      {success && (
+        <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-300 text-emerald-700 text-sm rounded-md p-3 mb-3">
+          <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
+          <span>{success}</span>
+        </div>
+      )}
+
+      {rows && (
+        <div>
+          {skippedTeams.length > 0 && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-300 rounded-md p-2 mb-3">
+              Без указанного игрока в файле (пропущены): {skippedTeams.join(", ")}
+            </p>
+          )}
+          <p className="text-xs text-slate-500 mb-2">
+            Проверьте и поправьте имена (особенно там, где ⚠️ — игрок не был указан в файле явно).
+            Зелёный кружок — имя совпало с уже сохранённым в этом турнире игроком; жёлтый — не совпало,
+            при сохранении попадёт как новая запись.
+          </p>
+          <div className="max-h-96 overflow-y-auto rounded-lg border border-slate-300">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-200 text-slate-600 sticky top-0">
+                <tr>
+                  <th className="w-4"></th>
+                  <th className="text-left py-2 px-2">Имя</th>
+                  <th className="text-right py-2 px-1">Игр</th>
+                  <th className="text-right py-2 px-1">В</th>
+                  <th className="text-right py-2 px-1">Н</th>
+                  <th className="text-right py-2 px-1">П</th>
+                  <th className="text-right py-2 px-1">ГЗ</th>
+                  <th className="text-right py-2 px-2">ГП</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => {
+                  const matched = existingNames.has(r.name);
+                  return (
+                    <tr key={i} className="border-t border-slate-200">
+                      <td className="text-center">
+                        <span className={`inline-block w-2 h-2 rounded-full ${matched ? "bg-green-500" : "bg-amber-400"}`} title={matched ? "совпало" : "новая запись"} />
+                      </td>
+                      <td className="py-1 px-2">
+                        <input
+                          value={r.name}
+                          onChange={(e) => updateRow(i, "name", e.target.value)}
+                          className={`w-full bg-white border rounded px-1.5 py-1 text-xs ${matched ? "border-slate-300" : "border-amber-400"}`}
+                        />
+                      </td>
+                      {["played", "wins", "draws", "losses", "goalsFor", "goalsAgainst"].map((field) => (
+                        <td key={field} className="py-1 px-1">
+                          <input
+                            type="number"
+                            value={r[field]}
+                            onChange={(e) => updateRow(i, field, e.target.value === "" ? "" : Number(e.target.value))}
+                            className="w-12 bg-white border border-slate-300 rounded px-1 py-1 text-xs text-right"
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <button
+            onClick={confirmSave}
+            disabled={busy}
+            style={{ backgroundColor: BRAND_RED }}
+            className="mt-3 hover:brightness-110 disabled:opacity-50 text-white font-medium text-sm px-4 py-2 rounded-md"
+          >
+            Сохранить в «{targetTournament?.name}»
+          </button>
+        </div>
+      )}
     </div>
   );
 }
