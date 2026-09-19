@@ -235,6 +235,7 @@ function computeBracket(wb, players, bracketOrder) {
       const finalNames = new Set();
       let champion = null;
       let pastThirdPlace = false; // ниже подписи "N место" — уже не настоящий финал, а матч за 3-е место
+      const thirdPlaceMatch = []; // { name, isWinner } — если в сетке есть отдельный матч за 3-е место
       while (r < data.length) {
         const row = data[r] || [];
         const rowTitle = String(row[1] || "").trim();
@@ -255,6 +256,11 @@ function computeBracket(wb, players, bracketOrder) {
           } else if (!pastThirdPlace) {
             if (raw.startsWith("🏆")) champion = normalizeName(raw.replace("🏆", "").trim());
             else finalNames.add(normalizeName(raw));
+          } else {
+            // Матч за 3-е место: победитель (с 🏆) получает титул "3 место",
+            // проигравший — "4 место" (а не просто "Полуфиналист").
+            if (raw.startsWith("🏆")) thirdPlaceMatch.push({ name: normalizeName(raw.replace("🏆", "").trim()), isWinner: true });
+            else thirdPlaceMatch.push({ name: normalizeName(raw), isWinner: false });
           }
         }
         r++;
@@ -279,6 +285,13 @@ function computeBracket(wb, players, bracketOrder) {
         const p = players[champion] || (players[champion] = newRecord(champion));
         p.bracketStage[title] = "champion";
       }
+      // Матч за 3-е место — определяет титул точнее, чем общий "Полуфиналист", поэтому
+      // переопределяем bracketStage напрямую (не через обычное "только если выше рангом",
+      // а безусловно — это уточнение, а не понижение).
+      thirdPlaceMatch.forEach(({ name, isWinner }) => {
+        const p = players[name] || (players[name] = newRecord(name));
+        p.bracketStage[title] = isWinner ? "third" : "fourth";
+      });
 
       i = r;
       continue;
@@ -922,8 +935,8 @@ const LEGACY_FORMATS = [
 // Общие для ВСЕХ парсеров (современного и исторических): стадии титулов и выбор
 // единственного самого почётного титула за турнир — сначала по стадии (Победитель >
 // Финалист > Полуфиналист), при равенстве — по порядку сетки в файле (раньше = почётнее).
-const STAGE_LABEL = { semi: "Полуфиналист", final: "Финалист", champion: "Победитель" };
-const STAGE_RANK = { semi: 1, final: 2, champion: 3 };
+const STAGE_LABEL = { semi: "Полуфиналист", fourth: "4 место", third: "3 место", final: "Финалист", champion: "Победитель" };
+const STAGE_RANK = { semi: 1, fourth: 1, third: 2, final: 3, champion: 4 };
 
 function pickBestTitle(bracketStageMap, bracketOrder) {
   let best = null;
@@ -1565,11 +1578,13 @@ function PlayerCellName({ name }) {
 
 function MatrixView({ tournaments, cutoffs }) {
   const [format, setFormat] = useState("solo");
+  const [mode, setMode] = useState("public");
   const list = tournaments[format] || [];
   const cutoffId = cutoffs[format];
 
-  // Строки/сортировка — те же игроки и тот же порядок, что и в "Публичном" рейтинге.
-  const standings = useMemo(() => computeStandings(list, "public", cutoffId), [list, cutoffId]);
+  // Строки/сортировка — те же игроки и тот же порядок, что и в соответствующем режиме
+  // основного рейтинга ("Актуальный" — с учётом отсечки, "За всё время" — без неё).
+  const standings = useMemo(() => computeStandings(list, mode, cutoffId), [list, mode, cutoffId]);
 
   const cellData = useMemo(() => {
     const map = {};
@@ -1586,6 +1601,28 @@ function MatrixView({ tournaments, cutoffs }) {
 
   return (
     <div>
+      <div className="flex flex-wrap gap-2 mb-2">
+        <button
+          onClick={() => setMode("public")}
+          disabled={!cutoffId}
+          style={mode === "public" ? { backgroundColor: BRAND_BLUE } : undefined}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+            mode === "public" ? "text-white" : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+          }`}
+        >
+          Актуальный рейтинг
+        </button>
+        <button
+          onClick={() => setMode("all")}
+          style={mode === "all" ? { backgroundColor: BRAND_BLUE } : undefined}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+            mode === "all" ? "text-white" : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+          }`}
+        >
+          Рейтинг за всё время
+        </button>
+      </div>
+
       <div className="flex flex-wrap gap-2 mb-6">
         {FORMATS.map((f) => (
           <button
@@ -1621,7 +1658,9 @@ function MatrixView({ tournaments, cutoffs }) {
             <table className="text-sm border-collapse w-full">
               <thead>
                 <tr className="bg-slate-200/80 text-slate-700 text-xs">
-                  <th className="sticky left-0 bg-slate-200 z-10 px-3 py-2 text-left font-medium whitespace-nowrap">Игрок</th>
+                  <th className="sticky left-0 bg-slate-200 z-10 px-3 py-2 text-left font-medium whitespace-nowrap">
+                    <span className="inline-block w-5 text-slate-500">#</span>Игрок
+                  </th>
                   <th className="px-3 py-2 text-right font-medium whitespace-nowrap border-l border-slate-300">Турниров</th>
                   {list.map((t) => {
                     const { main, sub } = splitTournamentName(t.name);
@@ -1637,8 +1676,11 @@ function MatrixView({ tournaments, cutoffs }) {
               <tbody>
                 {standings.map((s, i) => (
                   <tr key={s.name} className={`border-t border-slate-200 ${i % 2 === 0 ? "bg-slate-100/10" : "bg-slate-100/40"}`}>
-                    <td className="sticky left-0 bg-white px-3 py-1.5 text-slate-900 font-medium max-w-[150px]">
-                      <PlayerCellName name={s.name} />
+                    <td className="sticky left-0 bg-white px-3 py-1.5 text-slate-900 font-medium max-w-[165px]">
+                      <div className="flex items-start">
+                        <span className="inline-block w-5 shrink-0 text-slate-400 tabular-nums">{i + 1}</span>
+                        <PlayerCellName name={s.name} />
+                      </div>
                     </td>
                     <td className="px-3 py-1.5 text-right text-slate-600 tabular-nums border-l border-slate-200">{s.tournamentsPlayed}</td>
                     {list.map((t, idx) => {
@@ -1660,59 +1702,170 @@ function MatrixView({ tournaments, cutoffs }) {
   );
 }
 
+// Список для "Рейтинг для Чемпионшипа": соло-игроки с рейтингом ≤50 + отдельно те, кого
+// вообще нет в соло-рейтинге (никогда не играли соло), но у них есть пара с рейтингом ≤50 —
+// такие тоже считаются "слабыми" и добавляются в список. Ретро не учитывается вовсе.
+function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
+  const soloStandings = useMemo(
+    () => computeStandings(tournaments.solo || [], "public", cutoffs.solo),
+    [tournaments.solo, cutoffs.solo]
+  );
+  const pairStandings = useMemo(
+    () => computeStandings(tournaments.pair || [], "public", cutoffs.pair),
+    [tournaments.pair, cutoffs.pair]
+  );
+
+  const rows = useMemo(() => {
+    const soloNames = new Set(soloStandings.map((s) => s.name));
+    const result = [];
+
+    soloStandings.forEach((s) => {
+      if (s.avg <= 50) result.push({ name: s.name, rating: s.avg, source: "solo", pairName: null });
+    });
+
+    const seenFallback = new Set();
+    pairStandings.forEach((s) => {
+      if (s.avg > 50) return;
+      s.name.split("/").map((p) => p.trim()).forEach((person) => {
+        if (soloNames.has(person)) return; // если игрок есть в соло — судим только по соло
+        if (seenFallback.has(person)) return;
+        seenFallback.add(person);
+        result.push({ name: person, rating: s.avg, source: "pair", pairName: s.name });
+      });
+    });
+
+    result.sort((a, b) => b.rating - a.rating);
+    return result;
+  }, [soloStandings, pairStandings]);
+
+  const filtered = query
+    ? rows.filter((r) => normalizeForSearch(r.name).includes(normalizeForSearch(query)))
+    : rows;
+
+  return (
+    <div>
+      <p className="text-xs text-slate-500 mb-4">
+        Игроки с рейтингом 50 и ниже: показан соло-рейтинг — а если игрок никогда не играл
+        соло, то рейтинг той пары, за которую он выступает (ретро не учитывается).
+      </p>
+      <div className="overflow-hidden rounded-xl border border-slate-300">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-slate-200/80 text-slate-700 text-left uppercase tracking-normal sm:tracking-wide text-xs">
+              <th className="py-3 pl-3 pr-1 w-8 font-medium">#</th>
+              <th className="py-3 px-1 sm:px-4 font-medium">Игрок</th>
+              <th className="py-3 px-1 sm:px-4 font-medium text-right">Рейтинг</th>
+              <th className="py-3 pl-1 pr-3 sm:px-4 font-medium text-right">Источник</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r, i) => (
+              <tr
+                key={r.name}
+                onClick={() => onSelectPlayer({ name: r.source === "pair" ? r.pairName : r.name, format: r.source === "pair" ? "pair" : "solo" })}
+                className={`border-t border-slate-200 cursor-pointer hover:bg-slate-200/60 transition-colors ${i % 2 === 0 ? "bg-slate-100/10" : "bg-slate-100/40"}`}
+              >
+                <td className="py-2.5 pl-3 pr-1 text-slate-400 tabular-nums">{i + 1}</td>
+                <td className="py-2.5 px-1 sm:px-4 text-slate-900 font-medium">{r.name}</td>
+                <td className="py-2.5 px-1 sm:px-4 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>
+                  {Math.round(r.rating)}
+                </td>
+                <td className="py-2.5 pl-1 pr-3 sm:px-4 text-right text-slate-500 text-xs whitespace-nowrap">
+                  {r.source === "solo" ? "Соло" : `Пара: ${r.pairName}`}
+                </td>
+              </tr>
+            ))}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={4} className="py-6 text-center text-slate-400 text-sm">Никого не найдено</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function PublicView({ tournaments, cutoffs, isAdmin }) {
   const [format, setFormat] = useState("solo");
   const [mode, setMode] = useState("public");
   const [query, setQuery] = useState("");
-  const [selectedPlayer, setSelectedPlayer] = useState(null);
+  const [selectedPlayer, setSelectedPlayer] = useState(null); // string (обычный режим) | { name, format } (Чемпионшип)
+  const [showChampionship, setShowChampionship] = useState(false);
 
-  const effectiveMode = isAdmin ? mode : "public";
   const list = tournaments[format] || [];
   const standings = useMemo(() => {
-    if (effectiveMode === "last3") return computeLast3EditionsStandings(list, 3);
-    return computeStandings(list, effectiveMode, cutoffs[format]);
-  }, [list, effectiveMode, cutoffs, format]);
+    if (mode === "last3") return computeLast3EditionsStandings(list, 3);
+    return computeStandings(list, mode, cutoffs[format]);
+  }, [list, mode, cutoffs, format]);
   const cutoffTournament = list.find((t) => t.id === cutoffs[format]);
+
+  // selectedPlayer бывает либо простой строкой (обычный режим — искать в текущем `list`),
+  // либо { name, format } (режим "Чемпионшип" — там игрок может быть найден через пару,
+  // и открывать его нужно в списке турниров того формата, где его реально нашли).
+  const modalPlayerName = typeof selectedPlayer === "string" ? selectedPlayer : selectedPlayer?.name;
+  const modalTournaments = typeof selectedPlayer === "string" ? list : tournaments[selectedPlayer?.format] || [];
 
   return (
     <div>
-      <div className="flex flex-wrap gap-2 mb-6">
-        {FORMATS.map((f) => (
-          <button
-            key={f.id}
-            onClick={() => setFormat(f.id)}
-            style={format === f.id ? { backgroundColor: BRAND_BLUE } : undefined}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-              format === f.id
-                ? "text-white"
-                : "bg-slate-200 text-slate-700 hover:bg-slate-300"
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
+      {/* Верхний ряд: вид рейтинга — виден всем посетителям */}
+      <div className="flex flex-wrap gap-2 mb-2">
+        <button
+          onClick={() => { setMode("public"); setShowChampionship(false); }}
+          disabled={!cutoffs[format]}
+          style={!showChampionship && mode === "public" ? { backgroundColor: BRAND_BLUE } : undefined}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+            !showChampionship && mode === "public" ? "text-white" : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+          }`}
+        >
+          Актуальный рейтинг
+        </button>
+        <button
+          onClick={() => { setMode("all"); setShowChampionship(false); }}
+          style={!showChampionship && mode === "all" ? { backgroundColor: BRAND_BLUE } : undefined}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+            !showChampionship && mode === "all" ? "text-white" : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+          }`}
+        >
+          Рейтинг за всё время
+        </button>
+        <button
+          onClick={() => setShowChampionship(true)}
+          style={showChampionship ? { backgroundColor: BRAND_BLUE } : undefined}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+            showChampionship ? "text-white" : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+          }`}
+        >
+          Рейтинг для Чемпионшипа
+        </button>
       </div>
 
-      {isAdmin && (
-        <div className="flex flex-wrap items-center gap-2 mb-5 text-sm">
-          <button
-            onClick={() => setMode("all")}
-            className={`px-3 py-1.5 rounded-md ${mode === "all" ? "bg-slate-300 text-white" : "text-slate-600 hover:text-slate-800"}`}
-          >
-            За всё время (только вы)
-          </button>
-          <button
-            onClick={() => setMode("public")}
-            disabled={!cutoffs[format]}
-            className={`px-3 py-1.5 rounded-md disabled:opacity-30 disabled:cursor-not-allowed ${mode === "public" ? "bg-slate-300 text-white" : "text-slate-600 hover:text-slate-800"}`}
-          >
-            Публичный (актуальные)
-          </button>
+      {/* Нижний ряд: формат — скрыт в режиме "Чемпионшип", там формат не выбирается отдельно */}
+      {!showChampionship && (
+        <div className="flex flex-wrap gap-2 mb-3">
+          {FORMATS.map((f) => (
+            <button
+              key={f.id}
+              onClick={() => setFormat(f.id)}
+              style={format === f.id ? { backgroundColor: BRAND_BLUE } : undefined}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                format === f.id ? "text-white" : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!showChampionship && isAdmin && (
+        <div className="mb-5">
           <button
             onClick={() => setMode("last3")}
-            className={`px-3 py-1.5 rounded-md ${mode === "last3" ? "bg-slate-300 text-white" : "text-slate-600 hover:text-slate-800"}`}
+            className={`px-3 py-1.5 rounded-md text-sm ${mode === "last3" ? "bg-slate-300 text-white" : "text-slate-600 hover:text-slate-800"}`}
           >
-            Топ-30 за последние 3 турнира
+            Топ-30 за последние 3 турнира (только вы)
           </button>
         </div>
       )}
@@ -1728,24 +1881,35 @@ function PublicView({ tournaments, cutoffs, isAdmin }) {
         />
       </div>
 
-      <p className="text-xs text-slate-500 mb-1">
-        {effectiveMode === "last3"
-          ? `Топ-30 по среднему % за личные последние 3 турнира каждого — но только те, кто играл хотя бы в одном из последних 3 турниров формата «${FORMATS.find(f=>f.id===format)?.label}».`
-          : "Очки рейтинга — это процент от максимально возможного количества набранных очков за один турнир. Рейтинг считается за 3 последних турнирах для каждого участника, чтобы отражать его актуальную форму."}
-      </p>
-      {effectiveMode === "public" && cutoffTournament && (
-        <p className="text-xs text-slate-400 mb-4">
-          В рейтинге учитываются только участники начиная с турнира «{cutoffTournament.name}».
-        </p>
-      )}
-      {effectiveMode !== "public" && <div className="mb-4" />}
+      {showChampionship ? (
+        <ChampionshipList
+          tournaments={tournaments}
+          cutoffs={cutoffs}
+          query={query}
+          onSelectPlayer={setSelectedPlayer}
+        />
+      ) : (
+        <>
+          <p className="text-xs text-slate-500 mb-1">
+            {mode === "last3"
+              ? `Топ-30 по среднему % за личные последние 3 турнира каждого — но только те, кто играл хотя бы в одном из последних 3 турниров формата «${FORMATS.find(f=>f.id===format)?.label}».`
+              : "Очки рейтинга — это процент от максимально возможного количества набранных очков за один турнир. Рейтинг считается за 3 последних турнирах для каждого участника, чтобы отражать его актуальную форму."}
+          </p>
+          {mode === "public" && cutoffTournament && (
+            <p className="text-xs text-slate-400 mb-4">
+              В рейтинге учитываются только участники начиная с турнира «{cutoffTournament.name}».
+            </p>
+          )}
+          {mode !== "public" && <div className="mb-4" />}
 
-      <RatingTable standings={standings} query={query} onSelectPlayer={setSelectedPlayer} />
+          <RatingTable standings={standings} query={query} onSelectPlayer={setSelectedPlayer} />
+        </>
+      )}
 
       {selectedPlayer && (
         <PlayerDetailModal
-          playerName={selectedPlayer}
-          tournaments={list}
+          playerName={modalPlayerName}
+          tournaments={modalTournaments}
           onClose={() => setSelectedPlayer(null)}
         />
       )}
