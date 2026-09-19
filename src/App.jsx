@@ -73,6 +73,22 @@ function indexHeaders(row) {
   return col;
 }
 
+// Название сетки в файле часто написано КАПСОМ ("ЛИГА ЧЕМПИОНОВ — ВЕРХНЯЯ СЕТКА") —
+// для показа приводим к normal case ("Лига чемпионов — Верхняя сетка"), не трогая
+// произвольные названия, которые уже не капсом (например, вписанные админом вручную).
+function prettyBracketName(raw) {
+  if (!raw) return raw;
+  const str = String(raw);
+  if (str !== str.toUpperCase() || str === str.toLowerCase()) return str;
+  return str
+    .split(" — ")
+    .map((seg) => {
+      const lower = seg.toLowerCase();
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" — ");
+}
+
 function stageCategory(stage) {
   const s = String(stage);
   for (const { prefix, category } of STAGE_PREFIXES) {
@@ -99,6 +115,7 @@ function newRecord(name) {
     semi: { top: false, mid: false, low: false },
     final: { top: false, mid: false, low: false },
     reachedLCH: false,
+    bracketStage: {}, // название сетки (как в файле, дословно) -> "semi" | "final" | "champion"
   };
 }
 
@@ -193,15 +210,17 @@ function computePlayoffStats(wb, players) {
   }
 }
 
-function computeBracket(wb, players) {
+function computeBracket(wb, players, bracketOrder) {
   const ws = wb.Sheets["5_Сетка плей-офф"];
   if (!ws) throw new Error('Не найден лист "5_Сетка плей-офф"');
   const data = sheetToRows(ws);
   let i = 0;
   while (i < data.length) {
-    const title = String((data[i] || [])[1] || "").trim();
-    const category = BLOCK_TITLE_TO_CATEGORY[title];
+    const rawTitle = String((data[i] || [])[1] || "").trim();
+    const category = BLOCK_TITLE_TO_CATEGORY[rawTitle];
     if (category) {
+      const title = prettyBracketName(rawTitle);
+      if (bracketOrder && !bracketOrder.includes(title)) bracketOrder.push(title);
       const headerIdx = i + 1;
       const headerRow = data[headerIdx] || [];
       const populated = [];
@@ -249,11 +268,17 @@ function computeBracket(wb, players) {
       semiNames.forEach((name) => {
         const p = players[name] || (players[name] = newRecord(name));
         if (category !== "intertoto") p.semi[category] = true;
+        if (!p.bracketStage[title]) p.bracketStage[title] = "semi";
       });
       finalNames.forEach((name) => {
         const p = players[name] || (players[name] = newRecord(name));
         if (category !== "intertoto") p.final[category] = true;
+        p.bracketStage[title] = "final";
       });
+      if (champion) {
+        const p = players[champion] || (players[champion] = newRecord(champion));
+        p.bracketStage[title] = "champion";
+      }
 
       i = r;
       continue;
@@ -337,6 +362,98 @@ function buildLegacyRows(teamStats, playerOfTeam) {
 // Мы НЕ считаем очки/рейтинг для этого формата — только сырые В/Н/П/голы по каждому матчу
 // (обе ноги считаются отдельными матчами), которые потом накладываются на уже существующий
 // турнир (у него % уже посчитан через обычный импорт истории).
+// Разбирает структуру плей-офф форматов A и B: секции по имени ("Верхняя сетка"/"Средняя
+// сетка"/"Нижняя сетка"/"Финал Интертото" и т.п.) с раундами, подписанными текстом
+// ("1/4 финала"/"1/2 финала"/"Финал") — определяем стадию по префиксу подписи раунда,
+// а не по положению колонок (как в современном формате), потому что тут нет визуальной
+// сетки-таблицы, только построчное расписание. Одна и та же секция может встречаться
+// несколько раз подряд (например, "Верхняя сетка" отдельным блоком под 1/4 финала и
+// отдельным блоком под 1/2+финал) — это ничего не ломает, просто добавляется в тот же бренд.
+function parseTextRoundBracketStages(ws, playerOfTeam) {
+  const rowsPo = sheetToRows(ws);
+  // "Раунд"/название секции лежат в столбце B исходника — если колонка A на листе пустая,
+  // SheetJS обрезает её и все позиции "уезжают" на один влево (та же ловушка, что уже
+  // встречалась с листом "0_Настройки" в самом начале). Считаем реальное смещение через !ref.
+  const range = ws["!ref"] ? XLSX.utils.decode_range(ws["!ref"]) : { s: { c: 0 } };
+  const labelCol = 1 - range.s.c;
+
+  const bracketOrder = [];
+  const stageByTeam = {};
+  const ensureTeam = (t) => (stageByTeam[t] = stageByTeam[t] || {});
+  const setStage = (obj, key, stage) => {
+    const rank = STAGE_RANK[stage];
+    if (!obj[key] || STAGE_RANK[obj[key]] < rank) obj[key] = stage;
+  };
+
+  let i = 0;
+  while (i < rowsPo.length) {
+    const row = rowsPo[i] || [];
+    const label = String(row[labelCol] || "").trim();
+    const nextRow = rowsPo[i + 1] || [];
+    const isSectionHeader = label && String(nextRow[labelCol] || "").trim() === "Раунд";
+    if (isSectionHeader) {
+      const sectionName = label;
+      if (!bracketOrder.includes(sectionName)) bracketOrder.push(sectionName);
+      const col = indexHeaders(nextRow);
+      let r = i + 2;
+      while (r < rowsPo.length) {
+        const dataRow = rowsPo[r] || [];
+        const roundLabel = String(dataRow[labelCol] || "").trim();
+        const ahead = rowsPo[r + 1] || [];
+        if (roundLabel && String(ahead[labelCol] || "").trim() === "Раунд") break; // это уже заголовок следующей секции
+        if (!roundLabel) { r++; continue; }
+        const t1 = dataRow[col["Команда 1"]];
+        const t2 = dataRow[col["Команда 2"]];
+        const g1 = dataRow[col["Гол 1"]];
+        const g2 = dataRow[col["Гол 2"]];
+        const winner = dataRow[col["Победитель"]];
+        if (typeof g1 === "number" && typeof g2 === "number" && t1 && t2) {
+          let stage = null;
+          if (roundLabel.startsWith("Финал")) stage = "final";
+          else if (roundLabel.startsWith("1/2 финала")) stage = "semi";
+          if (stage) {
+            [t1, t2].forEach((t) => setStage(ensureTeam(String(t).trim()), sectionName, stage));
+            if (stage === "final" && winner) setStage(ensureTeam(String(winner).trim()), sectionName, "champion");
+          }
+        }
+        r++;
+      }
+      i = r;
+      continue;
+    }
+    i++;
+  }
+
+  const playerStage = {};
+  Object.entries(stageByTeam).forEach(([team, stages]) => {
+    const player = playerOfTeam[team];
+    if (!player) return;
+    const ps = (playerStage[player] = playerStage[player] || {});
+    Object.entries(stages).forEach(([bracket, stage]) => setStage(ps, bracket, stage));
+  });
+
+  // "Финал средней и нижней сеток" — решающий матч между чемпионами средней и нижней
+  // сетки, почётнее, чем просто "чемпион средней/нижней сетки" по отдельности — поднимаем
+  // его в списке сразу после верхней сетки, чтобы тай-брейк по порядку сеток (при равной
+  // стадии "Победитель") отдавал приоритет именно ему.
+  const specialIdx = bracketOrder.findIndex((b) => b.toLowerCase().includes("финал средней и нижней"));
+  if (specialIdx > 1) {
+    const [special] = bracketOrder.splice(specialIdx, 1);
+    bracketOrder.splice(1, 0, special);
+  }
+
+  // На некоторых файлах в той же позиции, где обычно название секции, случайно
+  // оказывается декоративная подпись раунда ("1/4 финала" и т.п.) — это не ломает сами
+  // титулы (внутри неё нет матчей 1/2 финала или финала, значит и стадия не назначится),
+  // но чтобы не засорять список сеток для админки — оставляем только те, где реально
+  // кто-то дошёл хотя бы до полуфинала.
+  const usedBrackets = new Set();
+  Object.values(stageByTeam).forEach((stages) => Object.keys(stages).forEach((b) => usedBrackets.add(b)));
+  const cleanBracketOrder = bracketOrder.filter((b) => usedBrackets.has(b));
+
+  return { playerStage, bracketOrder: cleanBracketOrder };
+}
+
 function parseLegacyFormatA(wb) {
   const wsIn = wb.Sheets["Ввод"];
   const wsPo = wb.Sheets["Плей-офф"];
@@ -379,7 +496,13 @@ function parseLegacyFormatA(wb) {
 
   const teamStats = tallyTeamStats(matches);
   const rows = buildLegacyRows(teamStats, playerOfTeam);
-  return { rows, skippedTeams };
+
+  const { playerStage, bracketOrder } = parseTextRoundBracketStages(wsPo, playerOfTeam);
+  rows.forEach((r) => {
+    r.titles = pickBestTitle(playerStage[r.name], bracketOrder);
+  });
+
+  return { rows, skippedTeams, bracketNames: bracketOrder };
 }
 
 // Формат B: листы "Команды" (состав, игроки через "+"), "Расписание" (матчи группы,
@@ -427,12 +550,96 @@ function parseLegacyFormatB(wb) {
 
   const teamStats = tallyTeamStats(matches);
   const rows = buildLegacyRows(teamStats, playerOfTeam);
-  return { rows, skippedTeams };
+
+  const { playerStage, bracketOrder } = parseTextRoundBracketStages(wsPo, playerOfTeam);
+  rows.forEach((r) => {
+    r.titles = pickBestTitle(playerStage[r.name], bracketOrder);
+  });
+
+  return { rows, skippedTeams, bracketNames: bracketOrder };
 }
 
 // Формат C: листы "Расписание группы" + "Расписание плей-офф". Игроки фигурируют в матчах
 // НАПРЯМУЮ (столбцы "Игрок 1"/"Игрок 2"), без привязки через клуб/команду — самый простой
 // случай, привязка "игрок -> игрок" тождественная.
+// Разбирает структуру плей-офф Формата C (там, где она есть): секции по имени
+// ("Верхняя сетка"/"Средняя сетка"/"Нижняя сетка" и т.п.), но раунды здесь пронумерованы
+// ("1 раунд", "2 раунд"...), а не названы словами — и одна и та же секция может
+// встречаться повторно в разных местах листа (каскад: вылетел из верхней — попал в
+// среднюю, и т.д.). Стадию определяем от МАКСИМАЛЬНОГО номера раунда, который вообще
+// встретился для этой секции по всему листу: последний раунд = финал, предпоследний =
+// полуфинал. Работает только там, где есть строка заголовков "Раунд"/"Игрок 1"/...; на
+// листах без заголовков (запасной разбор по фиксированным колонкам) титулы не считаем —
+// там просто нет опоры для определения раундов/секций.
+function parseNumberedRoundBracketStages(sheetsWithRows) {
+  const requiredHeaders = ["Раунд", "Игрок 1", "Гол 1", "Гол 2", "Игрок 2"];
+  const matchesBySection = {};
+
+  sheetsWithRows.forEach(({ rows }) => {
+    const blocks = [];
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i] || [];
+      if (requiredHeaders.every((h) => row.includes(h))) {
+        const col = indexHeaders(row);
+        const roundCol = col["Раунд"];
+        const sectionName = String((rows[i - 1] || [])[roundCol] || "").trim();
+        if (sectionName) blocks.push({ sectionName, headerRowIdx: i, col, roundCol });
+      }
+    }
+    blocks.forEach((block, bi) => {
+      const endIdx = bi + 1 < blocks.length ? blocks[bi + 1].headerRowIdx - 1 : rows.length;
+      for (let r = block.headerRowIdx + 1; r < endIdx; r++) {
+        const row = rows[r] || [];
+        const roundLabel = String(row[block.roundCol] || "").trim();
+        const m = roundLabel.match(/^(\d+)\s*раунд/i);
+        if (!m) continue;
+        const roundNum = parseInt(m[1], 10);
+        const t1 = row[block.col["Игрок 1"]];
+        const t2 = row[block.col["Игрок 2"]];
+        const g1 = row[block.col["Гол 1"]];
+        const g2 = row[block.col["Гол 2"]];
+        const winner = block.col["Победитель"] !== undefined ? row[block.col["Победитель"]] : null;
+        if (typeof g1 === "number" && typeof g2 === "number" && t1 && t2) {
+          (matchesBySection[block.sectionName] = matchesBySection[block.sectionName] || []).push({
+            roundNum,
+            t1: normalizeName(String(t1).trim()),
+            t2: normalizeName(String(t2).trim()),
+            winner: winner ? normalizeName(String(winner).trim()) : null,
+          });
+        }
+      }
+    });
+  });
+
+  const maxRoundBySection = {};
+  Object.entries(matchesBySection).forEach(([section, ms]) => {
+    maxRoundBySection[section] = Math.max(...ms.map((m) => m.roundNum));
+  });
+
+  const setStage = (obj, key, stage) => {
+    const rank = STAGE_RANK[stage];
+    if (!obj[key] || STAGE_RANK[obj[key]] < rank) obj[key] = stage;
+  };
+
+  const bracketOrder = [];
+  const playerStage = {};
+  Object.entries(matchesBySection).forEach(([section, ms]) => {
+    if (!bracketOrder.includes(section)) bracketOrder.push(section);
+    const maxRound = maxRoundBySection[section];
+    ms.forEach(({ roundNum, t1, t2, winner }) => {
+      let stage = null;
+      if (roundNum === maxRound) stage = "final";
+      else if (roundNum === maxRound - 1) stage = "semi";
+      if (stage) {
+        [t1, t2].forEach((name) => setStage((playerStage[name] = playerStage[name] || {}), section, stage));
+        if (stage === "final" && winner) setStage((playerStage[winner] = playerStage[winner] || {}), section, "champion");
+      }
+    });
+  });
+
+  return { playerStage, bracketOrder };
+}
+
 function parseLegacyFormatC(wb) {
   const headers = { t1: "Игрок 1", g1: "Гол 1", g2: "Гол 2", t2: "Игрок 2" };
   const required = ["Игрок 1", "Гол 1", "Гол 2", "Игрок 2"];
@@ -457,9 +664,11 @@ function parseLegacyFormatC(wb) {
 
   let matches = [];
   let sheetsUsed = 0;
+  const sheetsWithRows = [];
   sourceSheetNames.forEach((sheetName) => {
     const ws = wb.Sheets[sheetName];
     const rows = sheetToRowsNoMergeDupes(ws);
+    sheetsWithRows.push({ ws, rows });
     const headerIdx = findHeaderRow(rows, required);
     if (headerIdx !== -1) {
       const col = indexHeaders(rows[headerIdx]);
@@ -499,7 +708,13 @@ function parseLegacyFormatC(wb) {
   const identity = {};
   Object.keys(playerStats).forEach((name) => { identity[name] = normalizeName(name); });
   const rows = buildLegacyRows(playerStats, identity);
-  return { rows, skippedTeams: [] };
+
+  const { playerStage, bracketOrder } = parseNumberedRoundBracketStages(sheetsWithRows);
+  rows.forEach((r) => {
+    r.titles = pickBestTitle(playerStage[r.name], bracketOrder);
+  });
+
+  return { rows, skippedTeams: [], bracketNames: bracketOrder };
 }
 
 // Формат D: листы, где есть столбцы "Пара 1"/"Пара 2" (сами заголовки голов называются
@@ -508,6 +723,65 @@ function parseLegacyFormatC(wb) {
 // голы первой и второй пары, затем сама "Пара 2"). Имя пары иногда записано вместе с
 // декоративным названием "команды" через перенос строки ("Оськин/Иванов\nСборная АПЛ") —
 // берём только первую строчку.
+// Формат D: в подписи матча стадия написана словами прямо в тексте ("Верхняя сетка. 2
+// раунд (полуфинал)", "Верхняя сетка. ФИНАЛ"), плюс отдельный итоговый блок с прямым
+// указанием чемпиона ("🏆 Чемпион Верхней сетки") — не нужно ничего вычислять, только
+// прочитать текст.
+function parseFormatDBracketStages(ws) {
+  const rows = sheetToRowsNoMergeDupes(ws);
+  const headerIdx = rows.findIndex((row) => row && row.includes("Пара 1") && row.includes("Пара 2"));
+  if (headerIdx === -1) return { playerStage: {}, bracketOrder: [] };
+  const pairCol = rows[headerIdx].indexOf("Пара 1");
+  const g1Col = pairCol + 1;
+  const g2Col = pairCol + 2;
+  const pair2Col = pairCol + 3;
+  const winnerCol = rows[headerIdx].indexOf("Победитель"); // -1, если такого столбца нет — тогда просто не определяем чемпиона
+
+  const bracketOrder = [];
+  const playerStage = {};
+  const setStage = (obj, key, stage) => {
+    const rank = STAGE_RANK[stage];
+    if (!obj[key] || STAGE_RANK[obj[key]] < rank) obj[key] = stage;
+  };
+  const cleanName = (v) => (v ? String(v).split("\n")[0].trim() : null);
+
+  // "🏆 Чемпион <сетки>" намеренно НЕ разбираем: название сетки там стоит в родительном
+  // падеже ("Чемпион Верхней сетки"), а в подписях матчей — в именительном ("Верхняя
+  // сетка. ..."), из-за чего чемпион и финалист расходились по разным ключам и не
+  // сравнивались между собой. Надёжнее взять победителя прямо из результата матча,
+  // подписанного как "ФИНАЛ" — там название сетки гарантированно совпадает по форме.
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i] || [];
+    const label = row[0] ? String(row[0]).trim() : "";
+    if (!label || label.startsWith("🏆")) continue;
+
+    const dotIdx = label.indexOf(".");
+    if (dotIdx === -1) continue; // строки вроде "1 тур" — не про конкретную сетку
+    const sectionName = label.slice(0, dotIdx).trim();
+    const rest = label.slice(dotIdx + 1).trim().toLowerCase();
+    let stage = null;
+    if (rest.includes("полуфинал")) stage = "semi";
+    else if (rest.includes("финал")) stage = "final"; // "ФИНАЛ" без приставки "полу"
+    if (!stage) continue;
+
+    const dataRow = rows[i + 1] || [];
+    const t1 = cleanName(dataRow[pairCol]);
+    const t2 = cleanName(dataRow[pair2Col]);
+    const g1 = dataRow[g1Col];
+    const g2 = dataRow[g2Col];
+    if (t1 && t2 && typeof g1 === "number" && typeof g2 === "number") {
+      if (!bracketOrder.includes(sectionName)) bracketOrder.push(sectionName);
+      [t1, t2].forEach((name) => setStage((playerStage[name] = playerStage[name] || {}), sectionName, stage));
+      if (stage === "final" && winnerCol !== -1) {
+        const winner = cleanName(dataRow[winnerCol]);
+        if (winner) setStage((playerStage[winner] = playerStage[winner] || {}), sectionName, "champion");
+      }
+    }
+  }
+
+  return { playerStage, bracketOrder };
+}
+
 function parseLegacyFormatD(wb) {
   const sourceSheetNames = wb.SheetNames.filter((name) => {
     const rows = sheetToRowsNoMergeDupes(wb.Sheets[name]);
@@ -547,6 +821,15 @@ function parseLegacyFormatD(wb) {
   const identity = {};
   Object.keys(playerStats).forEach((name) => { identity[name] = normalizeName(name); });
   const rows = buildLegacyRows(playerStats, identity);
+
+  const poSheetName = sourceSheetNames.find((n) => n.toLowerCase().includes("плей"));
+  if (poSheetName) {
+    const { playerStage, bracketOrder } = parseFormatDBracketStages(wb.Sheets[poSheetName]);
+    rows.forEach((r) => {
+      r.titles = pickBestTitle(playerStage[r.name], bracketOrder);
+    });
+    return { rows, skippedTeams: [], bracketNames: bracketOrder };
+  }
   return { rows, skippedTeams: [] };
 }
 
@@ -566,8 +849,66 @@ function parseModernFormatForBackfill(wb) {
     losses: r.losses,
     goalsFor: r.goalsFor,
     goalsAgainst: r.goalsAgainst,
+    titles: r.titles,
   }));
-  return { rows, skippedTeams: [] };
+  return { rows, skippedTeams: [], bracketNames: parsed.bracketNames };
+}
+
+// Компактный редактор титулов — плашки под именем игрока (не отдельные столбцы,
+// чтобы не заставлять листать таблицу вправо). Если известен список сеток этого
+// турнира (bracketOptions) — выбор сетки выпадающим списком; если нет (старые форматы,
+// где структура сеток не разбирается) — свободный текст.
+function TitlesEditor({ titles, bracketOptions, onChange }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [bracket, setBracket] = useState("");
+  const [stage, setStage] = useState("Полуфиналист");
+
+  const removeTitle = (idx) => onChange(titles.filter((_, i) => i !== idx));
+  const addTitle = () => {
+    if (!bracket.trim()) return;
+    onChange([...titles, { bracket: bracket.trim(), stage }]);
+    setBracket("");
+    setShowAdd(false);
+  };
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {titles.map((t, i) => (
+        <span key={i} className="inline-flex items-center gap-1 bg-amber-100 border border-amber-300 text-amber-800 text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap">
+          {t.stage} ({t.bracket})
+          <button onClick={() => removeTitle(i)} className="text-amber-600 hover:text-red-600 shrink-0">
+            <X size={9} />
+          </button>
+        </span>
+      ))}
+      {showAdd ? (
+        <span className="inline-flex items-center gap-1">
+          {bracketOptions && bracketOptions.length > 0 ? (
+            <select value={bracket} onChange={(e) => setBracket(e.target.value)} className="text-[10px] bg-white border border-slate-300 rounded px-1 py-0.5 max-w-[110px]">
+              <option value="">сетка…</option>
+              {bracketOptions.map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          ) : (
+            <input
+              value={bracket}
+              onChange={(e) => setBracket(e.target.value)}
+              placeholder="название сетки"
+              className="text-[10px] bg-white border border-slate-300 rounded px-1 py-0.5 w-24"
+            />
+          )}
+          <select value={stage} onChange={(e) => setStage(e.target.value)} className="text-[10px] bg-white border border-slate-300 rounded px-1 py-0.5">
+            <option value="Полуфиналист">Полуфиналист</option>
+            <option value="Финалист">Финалист</option>
+            <option value="Победитель">Победитель</option>
+          </select>
+          <button onClick={addTitle} className="text-green-600 hover:text-green-700 shrink-0"><Check size={12} /></button>
+          <button onClick={() => setShowAdd(false)} className="text-slate-400 hover:text-slate-600 shrink-0"><X size={12} /></button>
+        </span>
+      ) : (
+        <button onClick={() => setShowAdd(true)} className="text-[10px] text-blue-600 hover:underline shrink-0">+ титул</button>
+      )}
+    </div>
+  );
 }
 
 const LEGACY_FORMATS = [
@@ -578,15 +919,34 @@ const LEGACY_FORMATS = [
   { id: "modern", label: "Современный формат (0_Настройки/1_Участники/... — как в обычном импорте турнира) — начиная с ЧВ27", parser: parseModernFormatForBackfill },
 ];
 
+// Общие для ВСЕХ парсеров (современного и исторических): стадии титулов и выбор
+// единственного самого почётного титула за турнир — сначала по стадии (Победитель >
+// Финалист > Полуфиналист), при равенстве — по порядку сетки в файле (раньше = почётнее).
+const STAGE_LABEL = { semi: "Полуфиналист", final: "Финалист", champion: "Победитель" };
+const STAGE_RANK = { semi: 1, final: 2, champion: 3 };
+
+function pickBestTitle(bracketStageMap, bracketOrder) {
+  let best = null;
+  Object.entries(bracketStageMap || {}).forEach(([bracket, stage]) => {
+    const rank = STAGE_RANK[stage];
+    const orderIdx = bracketOrder.indexOf(bracket);
+    if (!best || rank > best.rank || (rank === best.rank && orderIdx < best.orderIdx)) {
+      best = { bracket, stage, rank, orderIdx };
+    }
+  });
+  return best ? [{ bracket: best.bracket, stage: STAGE_LABEL[best.stage] }] : [];
+}
+
 function parseTournamentFile(wb) {
   const { G, vsSize } = readSettings(wb);
   if (!G) throw new Error('Не удалось найти "кол-во матчей" на листе "0_Настройки"');
   if (!vsSize) throw new Error('Не удалось найти размер верхней сетки на листе "0_Настройки"');
 
   const players = {};
+  const bracketOrder = []; // порядок сеток как в файле — тай-брейк "почётности" при равной стадии
   computeGroupStats(wb, players);
   computePlayoffStats(wb, players);
-  computeBracket(wb, players);
+  computeBracket(wb, players, bracketOrder);
 
   const R = Math.log2(vsSize);
   const idealO = 4 + G * 2 + R * 3 + 2 + 2 + 4;
@@ -603,6 +963,8 @@ function parseTournamentFile(wb) {
     const losses = p.groupLosses + p.playoffLosses;
     const goalsFor = p.groupGoalsFor + p.playoffGoalsFor;
     const goalsAgainst = p.groupGoalsAgainst + p.playoffGoalsAgainst;
+    const titles = pickBestTitle(p.bracketStage, bracketOrder);
+
     return {
       name: p.name,
       played,
@@ -610,10 +972,15 @@ function parseTournamentFile(wb) {
       norm: round3(norm),
       pct: round3(Math.max(pct, MIN_RATING)),
       wins, draws, losses, goalsFor, goalsAgainst,
+      titles,
     };
   });
   rows.sort((a, b) => b.pct - a.pct);
-  return { rows, meta: { G, vsSize, R, idealO: round3(idealO), idealNorm: round3(idealNorm) } };
+  return {
+    rows,
+    meta: { G, vsSize, R, idealO: round3(idealO), idealNorm: round3(idealNorm) },
+    bracketNames: bracketOrder,
+  };
 }
 
 function round3(x) {
@@ -935,10 +1302,11 @@ function RatingTable({ standings, query, onSelectPlayer }) {
 }
 
 // Сводит статистику игрока по всем турнирам формата: сумма W-Н-П/голов (там, где эти
-// сырые данные есть) + список турниров с их индивидуальными показателями.
+// сырые данные есть) + список турниров с их индивидуальными показателями + все титулы.
 function computePlayerDetail(tournaments, playerName) {
   const totals = { wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0, matches: 0, hasStats: false };
   const history = [];
+  const titleAchievements = [];
   tournaments.forEach((t) => {
     const row = t.rows.find((r) => r.name === playerName);
     if (!row) return;
@@ -952,15 +1320,21 @@ function computePlayerDetail(tournaments, playerName) {
       totals.matches += row.played;
       totals.hasStats = true;
     }
-    history.push({ tournamentName: t.name, ...row, hasStats });
+    history.push({ tournamentId: t.id, tournamentName: t.name, ...row, hasStats });
+    (row.titles || []).forEach((title) => {
+      titleAchievements.push({ tournamentName: t.name, bracket: title.bracket, stage: title.stage });
+    });
   });
   history.reverse(); // сначала последние турниры
-  return { totals, history };
+  titleAchievements.reverse();
+  return { totals, history, titleAchievements };
 }
 
 function PlayerDetailModal({ playerName, tournaments, onClose }) {
   const detail = useMemo(() => computePlayerDetail(tournaments, playerName), [tournaments, playerName]);
-  const { totals, history } = detail;
+  const { totals, history, titleAchievements } = detail;
+  const [openTournamentId, setOpenTournamentId] = useState(null);
+  const openTournament = openTournamentId ? tournaments.find((t) => t.id === openTournamentId) : null;
 
   // Сбрасываем прокрутку страницы наверх при открытии — если страницу пролистали
   // вниз (например, кликнули по игроку в конце длинного списка), fixed-элемент
@@ -983,6 +1357,23 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
         </div>
 
         <div className="px-5 py-4 shrink-0">
+          {titleAchievements.length > 0 && (
+            <div className="mb-4">
+              <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2">Титулы</h3>
+              <div className="flex flex-wrap gap-1.5">
+                {titleAchievements.map((t, i) => (
+                  <span
+                    key={i}
+                    className="inline-flex items-center gap-1 bg-amber-100 border border-amber-300 text-amber-900 text-xs px-2 py-1 rounded-full"
+                  >
+                    <Trophy size={11} className="text-amber-600 shrink-0" />
+                    {t.tournamentName} — {t.stage} ({t.bracket})
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2">Итого за все турниры</h3>
           {totals.hasStats ? (
             <div className="grid grid-cols-3 gap-2">
@@ -1005,10 +1396,16 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
             целиком, независимо от панели браузера (внешняя модалка при этом
             не растягивается на весь экран и не упирается в неё). */}
         <div className="px-5 pb-5 flex flex-col min-h-0">
-          <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2 shrink-0">По турнирам</h3>
+          <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2 shrink-0">
+            По турнирам <span className="normal-case text-slate-400">(нажмите на турнир для подробностей)</span>
+          </h3>
           <div className="space-y-2 overflow-y-auto max-h-64 pr-1">
             {history.map((h, i) => (
-              <div key={i} className="bg-slate-200/50 rounded-lg px-3 py-2.5">
+              <button
+                key={i}
+                onClick={() => setOpenTournamentId(h.tournamentId)}
+                className="w-full text-left bg-slate-200/50 hover:bg-slate-200 transition-colors rounded-lg px-3 py-2.5"
+              >
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-sm text-slate-800 font-medium">{h.tournamentName}</span>
                   <span className="font-mono text-sm font-semibold" style={{ color: BRAND_RED }}>{Math.round(h.pct)}</span>
@@ -1020,8 +1417,82 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
                 ) : (
                   <p className="text-xs text-slate-400">только итоговый рейтинг</p>
                 )}
-              </div>
+              </button>
             ))}
+          </div>
+        </div>
+      </div>
+
+      {openTournament && (
+        <TournamentDetailModal
+          tournament={openTournament}
+          onClose={() => setOpenTournamentId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Уровень A: список участников турнира со статистикой + титулами, отсортирован по %.
+function TournamentDetailModal({ tournament, onClose }) {
+  const sortedRows = useMemo(() => [...tournament.rows].sort((a, b) => b.pct - a.pct), [tournament]);
+
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-start justify-center z-[60] p-2 sm:p-4 overflow-y-auto" onClick={onClose}>
+      <div
+        className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-xl shrink-0"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between rounded-t-2xl">
+          <h2 className="text-slate-900 font-semibold text-base truncate pr-3">{tournament.name}</h2>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-700 shrink-0">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="p-4">
+          <p className="text-xs text-slate-500 mb-2">Участников: {sortedRows.length}</p>
+          <div className="max-h-[65vh] overflow-y-auto rounded-lg border border-slate-300">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-200 text-slate-600 sticky top-0">
+                <tr>
+                  <th className="text-left py-2 px-2 w-6">#</th>
+                  <th className="text-left py-2 px-2">Игрок</th>
+                  <th className="text-right py-2 px-2">Игр</th>
+                  <th className="text-right py-2 px-2">В-Н-П</th>
+                  <th className="text-right py-2 px-2">Голы</th>
+                  <th className="text-right py-2 px-2">%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedRows.map((r, i) => (
+                  <tr key={r.name} className="border-t border-slate-200">
+                    <td className="py-1.5 px-2 text-slate-400 tabular-nums">{i + 1}</td>
+                    <td className="py-1.5 px-2 text-slate-900 font-medium">
+                      {r.name}
+                      {(r.titles || []).length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {r.titles.map((t, ti) => (
+                            <span key={ti} className="inline-flex items-center gap-0.5 bg-amber-100 border border-amber-300 text-amber-800 text-[10px] px-1.5 py-0.5 rounded-full">
+                              <Trophy size={9} className="text-amber-600" />{t.stage}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-slate-600">{r.played ?? "—"}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-slate-600 whitespace-nowrap">
+                      {r.wins !== null && r.wins !== undefined ? `${r.wins}-${r.draws}-${r.losses}` : "—"}
+                    </td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-slate-600 whitespace-nowrap">
+                      {r.goalsFor !== null && r.goalsFor !== undefined ? `${r.goalsFor}:${r.goalsAgainst}` : "—"}
+                    </td>
+                    <td className="py-1.5 px-2 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>
+                      {Math.round(r.pct)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -1735,6 +2206,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
         importedAt: new Date().toISOString(),
         rows: finalRows,
         meta: preview.meta,
+        bracketNames: preview.bracketNames || [],
       };
       const updated = [...(tournaments[format] || []), record];
       await saveTournaments(format, updated);
@@ -1938,7 +2410,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
               </div>
             )}
 
-            <div className="max-h-96 overflow-y-auto rounded-lg border border-slate-300">
+            <div className="max-h-96 overflow-x-auto overflow-y-auto rounded-lg border border-slate-300">
               <table className="w-full text-xs">
                 <thead className="bg-slate-200 text-slate-600 sticky top-0">
                   <tr>
@@ -1954,8 +2426,15 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
                 </thead>
                 <tbody>
                   {rows.map((r, i) => (
-                    <tr key={r.name} className="border-t border-slate-200 text-slate-700">
-                      <td className="py-1.5 px-3">{r.name}</td>
+                    <tr key={r.name} className="border-t border-slate-200 text-slate-700 align-top">
+                      <td className="py-1.5 px-3">
+                        <div>{r.name}</div>
+                        <TitlesEditor
+                          titles={r.titles || []}
+                          bracketOptions={preview.bracketNames}
+                          onChange={(newTitles) => setRows((prev) => prev.map((row, idx) => (idx === i ? { ...row, titles: newTitles } : row)))}
+                        />
+                      </td>
                       <td className="py-1.5 px-3 text-right tabular-nums">{r.played}</td>
                       <td className="py-1.5 px-3 text-right tabular-nums text-green-600">{r.wins}</td>
                       <td className="py-1.5 px-3 text-right tabular-nums text-slate-600">{r.draws}</td>
@@ -1980,7 +2459,10 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
                 </tbody>
               </table>
             </div>
-            <p className="text-xs text-slate-400 mt-1">Значения "%" можно поправить вручную перед сохранением — например, если нужно скорректировать спорный случай.</p>
+            <p className="text-xs text-slate-400 mt-1">
+              Значения "%" можно поправить вручную перед сохранением. Титулы под именем сайт
+              определил сам — можно убрать лишний или добавить через "+ титул", если ошибся.
+            </p>
             {format === "pair" && !allPairsResolved && (
               <p className="text-amber-600 text-xs mt-2">Есть неразрешённые фамилии — заполните полные имена выше, прежде чем сохранять.</p>
             )}
@@ -2105,6 +2587,7 @@ function LegacyStatsImport({ tournaments, saveTournaments, addToRoster, roster }
   const [legacyFormatId, setLegacyFormatId] = useState(LEGACY_FORMATS[0].id);
   const [rows, setRows] = useState(null); // редактируемые строки превью
   const [skippedTeams, setSkippedTeams] = useState([]);
+  const [bracketNames, setBracketNames] = useState(null); // список сеток, если парсер их знает (напр. "Современный формат")
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -2118,6 +2601,7 @@ function LegacyStatsImport({ tournaments, saveTournaments, addToRoster, roster }
     setError(null);
     setSuccess(null);
     setRows(null);
+    setBracketNames(null);
     if (!f) return;
     if (!tournamentId) {
       setError("Сначала выберите, к какому уже сохранённому турниру относится этот файл.");
@@ -2142,6 +2626,7 @@ function LegacyStatsImport({ tournaments, saveTournaments, addToRoster, roster }
 
       setRows(resolvedRows);
       setSkippedTeams(parsed.skippedTeams);
+      setBracketNames(parsed.bracketNames || null);
     } catch (err) {
       setError(err.message || String(err));
     } finally {
@@ -2167,6 +2652,7 @@ function LegacyStatsImport({ tournaments, saveTournaments, addToRoster, roster }
           losses: Number(r.losses) || 0,
           goalsFor: Number(r.goalsFor) || 0,
           goalsAgainst: Number(r.goalsAgainst) || 0,
+          titles: r.titles || [],
         };
       });
 
@@ -2311,6 +2797,11 @@ function LegacyStatsImport({ tournaments, saveTournaments, addToRoster, roster }
                             <Sparkles size={12} className="text-blue-500 shrink-0" title="Имя подставлено автоматически по каталогу — проверьте" />
                           )}
                         </div>
+                        <TitlesEditor
+                          titles={r.titles || []}
+                          bracketOptions={bracketNames}
+                          onChange={(newTitles) => updateRow(i, "titles", newTitles)}
+                        />
                       </td>
                       {["played", "wins", "draws", "losses", "goalsFor", "goalsAgainst"].map((field) => (
                         <td key={field} className="py-1 px-1">
