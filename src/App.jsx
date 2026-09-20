@@ -1343,7 +1343,7 @@ function computePlayerDetail(tournaments, playerName) {
   return { totals, history, titleAchievements };
 }
 
-function PlayerDetailModal({ playerName, tournaments, onClose }) {
+function PlayerDetailModal({ playerName, tournaments, onClose, zIndex = 50 }) {
   const detail = useMemo(() => computePlayerDetail(tournaments, playerName), [tournaments, playerName]);
   const { totals, history, titleAchievements } = detail;
   const [openTournamentId, setOpenTournamentId] = useState(null);
@@ -1357,7 +1357,7 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
   }, []);
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-start justify-center z-50 p-2 sm:p-4 overflow-y-auto" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/70 flex items-start justify-center p-2 sm:p-4 overflow-y-auto" style={{ zIndex }} onClick={onClose}>
       <div
         className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-lg flex flex-col shrink-0"
         onClick={(e) => e.stopPropagation()}
@@ -1439,7 +1439,9 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
       {openTournament && (
         <TournamentDetailModal
           tournament={openTournament}
+          tournaments={tournaments}
           onClose={() => setOpenTournamentId(null)}
+          zIndex={zIndex + 10}
         />
       )}
     </div>
@@ -1447,11 +1449,12 @@ function PlayerDetailModal({ playerName, tournaments, onClose }) {
 }
 
 // Уровень A: список участников турнира со статистикой + титулами, отсортирован по %.
-function TournamentDetailModal({ tournament, onClose }) {
+function TournamentDetailModal({ tournament, tournaments, onClose, zIndex = 60 }) {
   const sortedRows = useMemo(() => [...tournament.rows].sort((a, b) => b.pct - a.pct), [tournament]);
+  const [selectedPlayer, setSelectedPlayer] = useState(null);
 
   return (
-    <div className="fixed inset-0 bg-black/80 flex items-start justify-center z-[60] p-2 sm:p-4 overflow-y-auto" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/80 flex items-start justify-center p-2 sm:p-4 overflow-y-auto" style={{ zIndex }} onClick={onClose}>
       <div
         className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-xl shrink-0"
         onClick={(e) => e.stopPropagation()}
@@ -1463,7 +1466,9 @@ function TournamentDetailModal({ tournament, onClose }) {
           </button>
         </div>
         <div className="p-4">
-          <p className="text-xs text-slate-500 mb-2">Участников: {sortedRows.length}</p>
+          <p className="text-xs text-slate-500 mb-2">
+            Участников: {sortedRows.length} <span className="text-slate-400">(нажмите на игрока для личной статистики)</span>
+          </p>
           <div className="max-h-[65vh] overflow-y-auto rounded-lg border border-slate-300">
             <table className="w-full text-xs">
               <thead className="bg-slate-200 text-slate-600 sticky top-0">
@@ -1478,7 +1483,11 @@ function TournamentDetailModal({ tournament, onClose }) {
               </thead>
               <tbody>
                 {sortedRows.map((r, i) => (
-                  <tr key={r.name} className="border-t border-slate-200">
+                  <tr
+                    key={r.name}
+                    onClick={() => setSelectedPlayer(r.name)}
+                    className="border-t border-slate-200 cursor-pointer hover:bg-slate-200/60 transition-colors"
+                  >
                     <td className="py-1.5 px-2 text-slate-400 tabular-nums">{i + 1}</td>
                     <td className="py-1.5 px-2 text-slate-900 font-medium">
                       {r.name}
@@ -1509,6 +1518,15 @@ function TournamentDetailModal({ tournament, onClose }) {
           </div>
         </div>
       </div>
+
+      {selectedPlayer && (
+        <PlayerDetailModal
+          playerName={selectedPlayer}
+          tournaments={tournaments}
+          onClose={() => setSelectedPlayer(null)}
+          zIndex={zIndex + 10}
+        />
+      )}
     </div>
   );
 }
