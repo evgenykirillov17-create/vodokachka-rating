@@ -1717,8 +1717,17 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
 
   const rows = useMemo(() => {
     const soloNames = new Set(soloStandings.map((s) => s.name));
-    const result = [];
+    // В имени пары человек иногда записан только фамилией ("Отрошко/Кутепов"), а в соло —
+    // полным именем ("Сергей Кутепов") — точное сравнение строк это пропускало. Сверяемся
+    // ещё и по фамилии (тот же справочник, что и для расшифровки пар при импорте).
+    const soloSurnameIndex = buildSurnameIndex(soloStandings.map((s) => s.name));
+    const hasSoloRecord = (person) => {
+      if (soloNames.has(person)) return true;
+      const matches = soloSurnameIndex[surnameOf(person).toLowerCase()];
+      return !!matches && matches.length === 1;
+    };
 
+    const result = [];
     soloStandings.forEach((s) => {
       if (s.avg <= 50) result.push({ name: s.name, rating: s.avg, source: "solo", pairName: null });
     });
@@ -1727,7 +1736,7 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
     pairStandings.forEach((s) => {
       if (s.avg > 50) return;
       s.name.split("/").map((p) => p.trim()).forEach((person) => {
-        if (soloNames.has(person)) return; // если игрок есть в соло — судим только по соло
+        if (hasSoloRecord(person)) return; // если игрок есть в соло (точно или по фамилии) — судим только по соло
         if (seenFallback.has(person)) return;
         seenFallback.add(person);
         result.push({ name: person, rating: s.avg, source: "pair", pairName: s.name });
@@ -1754,8 +1763,7 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
             <tr className="bg-slate-200/80 text-slate-700 text-left uppercase tracking-normal sm:tracking-wide text-xs">
               <th className="py-3 pl-3 pr-1 w-8 font-medium">#</th>
               <th className="py-3 px-1 sm:px-4 font-medium">Игрок</th>
-              <th className="py-3 px-1 sm:px-4 font-medium text-right">Рейтинг</th>
-              <th className="py-3 pl-1 pr-3 sm:px-4 font-medium text-right">Источник</th>
+              <th className="py-3 pl-1 pr-3 sm:px-4 font-medium text-right">Рейтинг</th>
             </tr>
           </thead>
           <tbody>
@@ -1767,17 +1775,14 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
               >
                 <td className="py-2.5 pl-3 pr-1 text-slate-400 tabular-nums">{i + 1}</td>
                 <td className="py-2.5 px-1 sm:px-4 text-slate-900 font-medium">{r.name}</td>
-                <td className="py-2.5 px-1 sm:px-4 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>
+                <td className="py-2.5 pl-1 pr-3 sm:px-4 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>
                   {Math.round(r.rating)}
-                </td>
-                <td className="py-2.5 pl-1 pr-3 sm:px-4 text-right text-slate-500 text-xs whitespace-nowrap">
-                  {r.source === "solo" ? "Соло" : `Пара: ${r.pairName}`}
                 </td>
               </tr>
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={4} className="py-6 text-center text-slate-400 text-sm">Никого не найдено</td>
+                <td colSpan={3} className="py-6 text-center text-slate-400 text-sm">Никого не найдено</td>
               </tr>
             )}
           </tbody>
