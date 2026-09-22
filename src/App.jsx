@@ -23,6 +23,12 @@ const BLOCK_TITLE_TO_CATEGORY = {
   "ЛИГА ЧЕМПИОНОВ — НИЖНЯЯ СЕТКА": "mid",
   "ЛИГА ЕВРОПЫ": "low",
   "ЛИГА КОНФЕРЕНЦИЙ": "intertoto",
+  // Более ранние турниры современного формата называли сетки проще, без приставки
+  // "ЛИГА ЧЕМПИОНОВ — " (например, ЧВ27) — просто дополнительные варианты названий той же
+  // структуры, старые не трогаем.
+  "ВЕРХНЯЯ СЕТКА": "top",
+  "НИЖНЯЯ СЕТКА": "mid",
+  "КУБОК ИНТЕРТОТО": "intertoto",
 };
 
 const STAGE_PREFIXES = [
@@ -235,6 +241,7 @@ function computeBracket(wb, players, bracketOrder) {
       const finalNames = new Set();
       let champion = null;
       let pastThirdPlace = false; // ниже подписи "N место" — уже не настоящий финал, а матч за 3-е место
+      let thirdPlaceResolved = false; // нашли победителя матча за 3-е место — дальше в этой же колонке
       const thirdPlaceMatch = []; // { name, isWinner } — если в сетке есть отдельный матч за 3-е место
       while (r < data.length) {
         const row = data[r] || [];
@@ -258,11 +265,20 @@ function computeBracket(wb, players, bracketOrder) {
             else finalNames.add(normalizeName(raw));
           } else {
             // Матч за 3-е место: победитель (с 🏆) получает титул "3 место",
-            // проигравший — "4 место" (а не просто "Полуфиналист").
-            if (raw.startsWith("🏆")) thirdPlaceMatch.push({ name: normalizeName(raw.replace("🏆", "").trim()), isWinner: true });
-            else thirdPlaceMatch.push({ name: normalizeName(raw), isWinner: false });
+            // проигравший — "4 место" (а не просто "Полуфиналист"). Сразу после того как
+            // нашли победителя — останавливаемся: в паре файлов ниже в той же колонке без
+            // предупреждения начинается СОВСЕМ ДРУГОЙ маленький турнир (тот же столбец
+            // используется повторно), и без этой остановки его участники ошибочно
+            // приписываются к текущей сетке.
+            if (raw.startsWith("🏆")) {
+              thirdPlaceMatch.push({ name: normalizeName(raw.replace("🏆", "").trim()), isWinner: true });
+              thirdPlaceResolved = true;
+            } else {
+              thirdPlaceMatch.push({ name: normalizeName(raw), isWinner: false });
+            }
           }
         }
+        if (thirdPlaceResolved) { r++; break; }
         r++;
       }
       if (champion) finalNames.add(champion);
@@ -653,6 +669,141 @@ function parseNumberedRoundBracketStages(sheetsWithRows) {
   return { playerStage, bracketOrder };
 }
 
+// Разбирает структуру плей-офф там, где подписи раунда/сетки идут ОТДЕЛЬНОЙ СТРОКОЙ прямо
+// над матчем (в том же столбце, что и "Игрок 1"), в свободном тексте — например,
+// "Верхняя сетка. 1 раунд (1 м.+8 м.)" или "Верхняя сетка. ФИНАЛ". Смесь: ранние раунды
+// пронумерованы, а финал часто подписан явным словом "ФИНАЛ"/"полуфинал" — учитываем оба
+// варианта. Устойчиво к: опечаткам в названии сетки внутри одного файла ("Вехняя сетка"
+// вместо "Верхняя сетка"), отсутствию строки заголовков вообще (тогда берём фиксированные
+// колонки C/D/E/F/G с поправкой на возможную обрезанную пустую колонку A), и победителю,
+// который из-за объединённых ячеек иногда попадает в строку-подпись раунда, а не в саму
+// строку с результатом.
+function parseInlineLabelBracketStages(sheetsWithRows, playerHeaders) {
+  const bracketOrder = [];
+  const playerStage = {};
+  const setStage = (obj, key, stage) => {
+    const rank = STAGE_RANK[stage];
+    if (!obj[key] || STAGE_RANK[obj[key]] < rank) obj[key] = stage;
+  };
+  const cleanName = (v) => (v ? normalizeName(String(v).split("\n")[0].trim()) : null);
+
+  const levenshtein = (a, b) => {
+    const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+    return dp[a.length][b.length];
+  };
+  // Список заведомо правильных названий сеток для этого стиля файлов — если встреченное
+  // название похоже на одно из них (но написано не точь-в-точь, например "Вехняя сетка"
+  // вместо "Верхняя сетка" — реальная опечатка в одном из исходных файлов), поправляем на
+  // правильный вариант сразу здесь, а не гадаем потом при показе.
+  const KNOWN_BRACKET_NAMES = ["Верхняя сетка", "Средняя сетка", "Нижняя сетка", "Кубок Интертото", "Финал Интертото"];
+  const canonicalSection = (name) => {
+    const exact = KNOWN_BRACKET_NAMES.find((k) => k.toLowerCase() === name.toLowerCase());
+    if (exact) return exact;
+    const known = KNOWN_BRACKET_NAMES.find((k) => levenshtein(k.toLowerCase(), name.toLowerCase()) <= 2);
+    if (known) return known;
+    const existing = bracketOrder.find((b) => levenshtein(b, name) <= 2);
+    return existing || name;
+  };
+
+  const matchesBySection = {};
+
+  const scanRows = (rows, t1Col, t2Col, g1Col, g2Col, winnerCol, startIdx) => {
+    let currentSection = null;
+    let labelRow = null;
+    for (let i = startIdx; i < rows.length; i++) {
+      const row = rows[i] || [];
+      const cell = row[t1Col];
+      const g1 = row[g1Col];
+      const isMatchRow = cell && typeof g1 === "number";
+      if (!isMatchRow) {
+        if (cell && typeof cell === "string" && cell.includes(".")) {
+          // "Фин. ниж. сетки+фин. кубка интер." — сокращённая запись бонусного матча между
+          // чемпионами двух разных сеток. Модель "одна секция = одна сетка" тут не подходит
+          // — пропускаем такие строки целиком, не пытаясь угадать.
+          if (cell.includes("+")) { currentSection = null; labelRow = null; continue; }
+          const dotIdx = cell.indexOf(".");
+          const rawSection = cell.slice(0, dotIdx).trim();
+          const sectionName = canonicalSection(rawSection);
+          const rest = cell.slice(dotIdx + 1).trim();
+          const restLower = rest.toLowerCase();
+          let explicitStage = null;
+          if (restLower.includes("полуфинал")) explicitStage = "semi";
+          else if (restLower.includes("финал")) explicitStage = "final";
+          const roundMatch = rest.match(/^(\d+)\s*раунд/i);
+          const roundNum = roundMatch ? parseInt(roundMatch[1], 10) : null;
+          currentSection = { name: sectionName, explicitStage, roundNum };
+          labelRow = row; // на случай, если победитель окажется приклеен сюда (объединённая ячейка)
+        }
+        continue;
+      }
+      if (!currentSection) continue;
+      const t1 = cleanName(row[t1Col]);
+      const t2 = cleanName(row[t2Col]);
+      const g2 = row[g2Col];
+      if (t1 && t2 && typeof g1 === "number" && typeof g2 === "number") {
+        if (!bracketOrder.includes(currentSection.name)) bracketOrder.push(currentSection.name);
+        let winner = winnerCol !== undefined ? cleanName(row[winnerCol]) : null;
+        if (!winner && labelRow && winnerCol !== undefined) winner = cleanName(labelRow[winnerCol]);
+        (matchesBySection[currentSection.name] = matchesBySection[currentSection.name] || []).push({
+          roundNum: currentSection.roundNum, explicitStage: currentSection.explicitStage, t1, t2, winner,
+        });
+      }
+    }
+  };
+
+  sheetsWithRows.forEach(({ ws, rows }) => {
+    const headerIdx = rows.findIndex((row) => row && row.includes(playerHeaders.t1) && row.includes(playerHeaders.t2));
+    if (headerIdx !== -1) {
+      const col = indexHeaders(rows[headerIdx]);
+      const t1Col = col[playerHeaders.t1];
+      const t2Col = col[playerHeaders.t2];
+      const g1Col = col["Гол 1"] !== undefined ? col["Гол 1"] : t1Col + 1;
+      const g2Col = col["Гол 2"] !== undefined ? col["Гол 2"] : t1Col + 2;
+      const winnerCol = col["Победитель"];
+      scanRows(rows, t1Col, t2Col, g1Col, g2Col, winnerCol, headerIdx + 1);
+      return;
+    }
+    // Нет строки заголовков вообще — пробуем фиксированные колонки C/D/E/F/G (с поправкой
+    // на возможную обрезанную пустую колонку A, как и в остальных запасных разборах).
+    if (!ws || !ws["!ref"]) return;
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+    const offset = range.s.c;
+    const t1Col = 2 - offset, g1Col = 3 - offset, g2Col = 4 - offset, t2Col = 5 - offset, winnerCol = 6 - offset;
+    scanRows(rows, t1Col, t2Col, g1Col, g2Col, winnerCol, 0);
+  });
+
+  Object.entries(matchesBySection).forEach(([section, ms]) => {
+    const hasExplicitFinal = ms.some((m) => m.explicitStage === "final");
+    const nums = ms.filter((m) => m.roundNum != null).map((m) => m.roundNum);
+    const maxNumberedRound = nums.length ? Math.max(...nums) : null;
+    ms.forEach((m) => {
+      let stage = null;
+      if (m.explicitStage === "final") stage = "final";
+      else if (m.explicitStage === "semi") stage = "semi";
+      else if (m.roundNum != null && maxNumberedRound != null) {
+        if (hasExplicitFinal) {
+          if (m.roundNum === maxNumberedRound) stage = "semi";
+        } else {
+          if (m.roundNum === maxNumberedRound) stage = "final";
+          else if (m.roundNum === maxNumberedRound - 1) stage = "semi";
+        }
+      }
+      if (!stage) return;
+      setStage((playerStage[m.t1] = playerStage[m.t1] || {}), section, stage);
+      setStage((playerStage[m.t2] = playerStage[m.t2] || {}), section, stage);
+      if (stage === "final" && m.winner) setStage((playerStage[m.winner] = playerStage[m.winner] || {}), section, "champion");
+    });
+  });
+
+  return { playerStage, bracketOrder };
+}
+
 function parseLegacyFormatC(wb) {
   const headers = { t1: "Игрок 1", g1: "Гол 1", g2: "Гол 2", t2: "Игрок 2" };
   const required = ["Игрок 1", "Гол 1", "Гол 2", "Игрок 2"];
@@ -722,7 +873,22 @@ function parseLegacyFormatC(wb) {
   Object.keys(playerStats).forEach((name) => { identity[name] = normalizeName(name); });
   const rows = buildLegacyRows(playerStats, identity);
 
-  const { playerStage, bracketOrder } = parseNumberedRoundBracketStages(sheetsWithRows);
+  // Два разных стиля подписи раундов встречаются в разных файлах ("Раунд"-колонка с
+  // пронумерованными раундами / отдельная строка-подпись с текстом прямо над матчем) —
+  // пробуем оба, для конкретного файла реально сработает только один, это безопасно.
+  const r1 = parseNumberedRoundBracketStages(sheetsWithRows);
+  const r2 = parseInlineLabelBracketStages(sheetsWithRows, { t1: "Игрок 1", t2: "Игрок 2" });
+  const bracketOrder = [...r1.bracketOrder, ...r2.bracketOrder.filter((b) => !r1.bracketOrder.includes(b))];
+  const playerStage = {};
+  [r1.playerStage, r2.playerStage].forEach((ps) => {
+    Object.entries(ps).forEach(([name, stages]) => {
+      const target = (playerStage[name] = playerStage[name] || {});
+      Object.entries(stages).forEach(([bracket, stage]) => {
+        const rank = STAGE_RANK[stage];
+        if (!target[bracket] || STAGE_RANK[target[bracket]] < rank) target[bracket] = stage;
+      });
+    });
+  });
   rows.forEach((r) => {
     r.titles = pickBestTitle(playerStage[r.name], bracketOrder);
   });
@@ -756,7 +922,7 @@ function parseFormatDBracketStages(ws) {
     const rank = STAGE_RANK[stage];
     if (!obj[key] || STAGE_RANK[obj[key]] < rank) obj[key] = stage;
   };
-  const cleanName = (v) => (v ? String(v).split("\n")[0].trim() : null);
+  const cleanName = (v) => (v ? normalizeName(String(v).split("\n")[0].trim()) : null);
 
   // "🏆 Чемпион <сетки>" намеренно НЕ разбираем: название сетки там стоит в родительном
   // падеже ("Чемпион Верхней сетки"), а в подписях матчей — в именительном ("Верхняя
@@ -875,47 +1041,95 @@ function TitlesEditor({ titles, bracketOptions, onChange }) {
   const [showAdd, setShowAdd] = useState(false);
   const [bracket, setBracket] = useState("");
   const [stage, setStage] = useState("Полуфиналист");
+  const [newColor, setNewColor] = useState(null); // null = авто (по названию сетки)
+  const [colorPickerIdx, setColorPickerIdx] = useState(null);
+  const [manualBracket, setManualBracket] = useState(false); // вручную вписываем сетку вместо выбора из списка
 
   const removeTitle = (idx) => onChange(titles.filter((_, i) => i !== idx));
+  const setTitleColor = (idx, color) => {
+    onChange(titles.map((t, i) => (i === idx ? { ...t, color: color || undefined } : t)));
+    setColorPickerIdx(null);
+  };
   const addTitle = () => {
     if (!bracket.trim()) return;
-    onChange([...titles, { bracket: bracket.trim(), stage }]);
+    const entry = { bracket: bracket.trim(), stage };
+    if (newColor) entry.color = newColor;
+    onChange([...titles, entry]);
     setBracket("");
+    setNewColor(null);
+    setManualBracket(false);
     setShowAdd(false);
   };
 
+  const ColorDots = ({ current, onPick }) => (
+    <span className="inline-flex items-center gap-0.5">
+      <button type="button" onClick={() => onPick(null)} title="Авто (по названию сетки)" className={`w-3 h-3 rounded-full bg-white border ${!current ? "border-slate-800 border-2" : "border-slate-300"}`} />
+      {Object.values(TITLE_COLOR_PRESETS).map((p) => (
+        <button key={p.key} type="button" onClick={() => onPick(p.key)} title={p.label} className={`w-3 h-3 rounded-full ${p.dot} ${current === p.key ? "ring-2 ring-offset-1 ring-slate-800" : ""}`} />
+      ))}
+    </span>
+  );
+
   return (
     <div className="mt-1 flex flex-wrap items-center gap-1">
-      {titles.map((t, i) => (
-        <span key={i} className="inline-flex items-center gap-1 bg-amber-100 border border-amber-300 text-amber-800 text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap">
-          {t.stage} ({t.bracket})
-          <button onClick={() => removeTitle(i)} className="text-amber-600 hover:text-red-600 shrink-0">
-            <X size={9} />
-          </button>
-        </span>
-      ))}
+      {titles.map((t, i) => {
+        const c = bracketColorClasses(t.bracket, t.color);
+        return (
+          <span key={i} className={`relative inline-flex items-center gap-1 ${c.bg} border ${c.border} ${c.text} text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap`}>
+            <button
+              type="button"
+              onClick={() => setColorPickerIdx(colorPickerIdx === i ? null : i)}
+              title="Изменить цвет заливки"
+              className={`w-2 h-2 rounded-full ${c.dot} shrink-0 ring-1 ring-black/10`}
+            />
+            {t.stage} ({t.bracket})
+            <button onClick={() => removeTitle(i)} className={`${c.icon} hover:text-red-600 shrink-0`}>
+              <X size={9} />
+            </button>
+            {colorPickerIdx === i && (
+              <span className="absolute top-full left-0 mt-1 z-20 bg-white border border-slate-300 rounded-lg shadow-md px-1.5 py-1">
+                <ColorDots current={t.color || null} onPick={(color) => setTitleColor(i, color)} />
+              </span>
+            )}
+          </span>
+        );
+      })}
       {showAdd ? (
-        <span className="inline-flex items-center gap-1">
-          {bracketOptions && bracketOptions.length > 0 ? (
-            <select value={bracket} onChange={(e) => setBracket(e.target.value)} className="text-[10px] bg-white border border-slate-300 rounded px-1 py-0.5 max-w-[110px]">
+        <span className="inline-flex items-center gap-1 flex-wrap">
+          {bracketOptions && bracketOptions.length > 0 && !manualBracket ? (
+            <select
+              value={bracket}
+              onChange={(e) => {
+                if (e.target.value === "__manual__") { setManualBracket(true); setBracket(""); }
+                else setBracket(e.target.value);
+              }}
+              className="text-[10px] bg-white border border-slate-300 rounded px-1 py-0.5 max-w-[130px]"
+            >
               <option value="">сетка…</option>
               {bracketOptions.map((b) => <option key={b} value={b}>{b}</option>)}
+              <option value="__manual__">— другое (вписать) —</option>
             </select>
           ) : (
-            <input
-              value={bracket}
-              onChange={(e) => setBracket(e.target.value)}
-              placeholder="название сетки"
-              className="text-[10px] bg-white border border-slate-300 rounded px-1 py-0.5 w-24"
-            />
+            <span className="inline-flex items-center gap-1">
+              <input
+                value={bracket}
+                onChange={(e) => setBracket(e.target.value)}
+                placeholder="название сетки"
+                className="text-[10px] bg-white border border-slate-300 rounded px-1 py-0.5 w-28"
+              />
+              {bracketOptions && bracketOptions.length > 0 && (
+                <button type="button" onClick={() => { setManualBracket(false); setBracket(""); }} className="text-[9px] text-blue-600 hover:underline shrink-0">список</button>
+              )}
+            </span>
           )}
           <select value={stage} onChange={(e) => setStage(e.target.value)} className="text-[10px] bg-white border border-slate-300 rounded px-1 py-0.5">
             <option value="Полуфиналист">Полуфиналист</option>
             <option value="Финалист">Финалист</option>
             <option value="Победитель">Победитель</option>
           </select>
+          <ColorDots current={newColor} onPick={setNewColor} />
           <button onClick={addTitle} className="text-green-600 hover:text-green-700 shrink-0"><Check size={12} /></button>
-          <button onClick={() => setShowAdd(false)} className="text-slate-400 hover:text-slate-600 shrink-0"><X size={12} /></button>
+          <button onClick={() => { setShowAdd(false); setManualBracket(false); }} className="text-slate-400 hover:text-slate-600 shrink-0"><X size={12} /></button>
         </span>
       ) : (
         <button onClick={() => setShowAdd(true)} className="text-[10px] text-blue-600 hover:underline shrink-0">+ титул</button>
@@ -936,6 +1150,59 @@ const LEGACY_FORMATS = [
 // единственного самого почётного титула за турнир — сначала по стадии (Победитель >
 // Финалист > Полуфиналист), при равенстве — по порядку сетки в файле (раньше = почётнее).
 const STAGE_LABEL = { semi: "Полуфиналист", fourth: "4 место", third: "3 место", final: "Финалист", champion: "Победитель" };
+
+// Именованная палитра для плашек титулов — используется и для автоопределения по названию
+// сетки, и как список вариантов при ручном выборе цвета в редакторе.
+const TITLE_COLOR_PRESETS = {
+  blue: { key: "blue", label: "Синий", bg: "bg-blue-100", border: "border-blue-300", text: "text-blue-800", icon: "text-blue-600", dot: "bg-blue-500" },
+  purple: { key: "purple", label: "Фиолетовый", bg: "bg-purple-100", border: "border-purple-300", text: "text-purple-800", icon: "text-purple-600", dot: "bg-purple-500" },
+  amber: { key: "amber", label: "Жёлтый", bg: "bg-amber-100", border: "border-amber-300", text: "text-amber-800", icon: "text-amber-600", dot: "bg-amber-500" },
+  green: { key: "green", label: "Зелёный", bg: "bg-green-100", border: "border-green-300", text: "text-green-800", icon: "text-green-600", dot: "bg-green-500" },
+  red: { key: "red", label: "Красный", bg: "bg-red-100", border: "border-red-300", text: "text-red-800", icon: "text-red-600", dot: "bg-red-500" },
+  gray: { key: "gray", label: "Серый", bg: "bg-slate-200", border: "border-slate-300", text: "text-slate-800", icon: "text-slate-600", dot: "bg-slate-500" },
+  pink: { key: "pink", label: "Розовый", bg: "bg-pink-100", border: "border-pink-300", text: "text-pink-800", icon: "text-pink-600", dot: "bg-pink-500" },
+  teal: { key: "teal", label: "Бирюзовый", bg: "bg-teal-100", border: "border-teal-300", text: "text-teal-800", icon: "text-teal-600", dot: "bg-teal-500" },
+};
+
+// Автоопределение цвета по названию сетки — работает и для новых названий ("Лига чемпионов
+// — Верхняя/Нижняя сетка", "Лига Европы", "Лига Конференций"), и для старых ("Верхняя/
+// Средняя/Нижняя сетка", "Кубок/Финал Интертото"). Важный нюанс: "Лига чемпионов — Нижняя
+// сетка" (ЛЧ НС) по названию говорит "нижняя", но по смыслу это СРЕДНЯЯ категория — красим
+// как "Средняя сетка", а не как настоящую (старую) "Нижняя сетка". Проверка на ключевые
+// слова — нечёткая (допускает 1-2 опечатки, вроде "Вехняя" вместо "Верхняя" — реальный
+// случай в паре исходных файлов), чтобы мелкая ошибка в написании не путала цвет.
+function autoBracketColorKey(bracketName) {
+  const s = String(bracketName || "").toLowerCase();
+  const hasChampionsPrefix = s.includes("чемпион");
+
+  const levenshtein = (a, b) => {
+    const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+    return dp[a.length][b.length];
+  };
+  const hasWordLike = (keyword) =>
+    s.includes(keyword) || s.split(/[\s—-]+/).some((w) => w.length > 3 && levenshtein(w, keyword) <= 2);
+
+  if (hasWordLike("верхняя")) return "blue";
+  if (hasWordLike("нижняя") && hasChampionsPrefix) return "purple";
+  if (hasWordLike("средняя")) return "purple";
+  if (hasWordLike("нижняя") || s.includes("европ")) return "amber";
+  if (s.includes("интертот") || s.includes("конференц")) return "green";
+  return "amber";
+}
+
+// overrideColor — необязательный ручной выбор (ключ из TITLE_COLOR_PRESETS), заданный
+// админом при редактировании конкретного титула; если не задан — цвет определяется
+// автоматически по названию сетки.
+function bracketColorClasses(bracketName, overrideColor) {
+  const key = overrideColor && TITLE_COLOR_PRESETS[overrideColor] ? overrideColor : autoBracketColorKey(bracketName);
+  return TITLE_COLOR_PRESETS[key];
+}
 const STAGE_RANK = { semi: 1, fourth: 1, third: 2, final: 3, champion: 4 };
 
 function pickBestTitle(bracketStageMap, bracketOrder) {
@@ -1164,6 +1431,7 @@ function useStorage() {
   const [tournaments, setTournaments] = useState({ solo: [], pair: [], retro: [] });
   const [cutoffs, setCutoffs] = useState({ solo: null, pair: null, retro: null });
   const [roster, setRoster] = useState([]); // список известных полных имён игроков
+  const [titlesEnabled, setTitlesEnabledState] = useState(true); // показывать ли титулы на сайте
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -1172,6 +1440,7 @@ function useStorage() {
       const nextT = { solo: [], pair: [], retro: [] };
       const nextC = { solo: null, pair: null, retro: null };
       let nextRoster = [];
+      let nextTitlesEnabled = true;
       for (const f of FORMATS) {
         const tRes = await storageGet(`tournaments:${f.id}`);
         if (tRes && tRes.value) nextT[f.id] = tRes.value;
@@ -1180,10 +1449,13 @@ function useStorage() {
       }
       const rRes = await storageGet("roster");
       if (rRes && rRes.value) nextRoster = rRes.value;
+      const tsRes = await storageGet("settings:titlesEnabled");
+      if (tsRes && tsRes.value) nextTitlesEnabled = tsRes.value.enabled;
       if (!cancelled) {
         setTournaments(nextT);
         setCutoffs(nextC);
         setRoster(nextRoster);
+        setTitlesEnabledState(nextTitlesEnabled);
         setLoaded(true);
       }
     }
@@ -1225,6 +1497,11 @@ function useStorage() {
     return filtered;
   }, [roster]);
 
+  const setTitlesEnabled = useCallback(async (enabled) => {
+    setTitlesEnabledState(enabled);
+    await storageSet("settings:titlesEnabled", { enabled });
+  }, []);
+
   // Полное восстановление из бэкапа (экспорт/импорт JSON) — перезаписывает всё целиком,
   // а не сливает с текущим состоянием.
   const restoreAll = useCallback(async (backup) => {
@@ -1241,7 +1518,7 @@ function useStorage() {
     setRoster(nextR);
   }, []);
 
-  return { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll };
+  return { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled };
 }
 
 function MedalBadge({ rank }) {
@@ -1335,15 +1612,32 @@ function computePlayerDetail(tournaments, playerName) {
     }
     history.push({ tournamentId: t.id, tournamentName: t.name, ...row, hasStats });
     (row.titles || []).forEach((title) => {
-      titleAchievements.push({ tournamentName: t.name, bracket: title.bracket, stage: title.stage });
+      titleAchievements.push({ tournamentName: t.name, bracket: title.bracket, stage: title.stage, color: title.color });
     });
   });
   history.reverse(); // сначала последние турниры
   titleAchievements.reverse();
-  return { totals, history, titleAchievements };
+
+  // Склеиваем одинаковые титулы в одну плашку ("3× Победитель (Верхняя сетка) — ЧВ24,
+  // ЧВ14, ЧВ12") вместо отдельной плашки на каждый турнир. Группируем строго по точному
+  // названию сетки — "Верхняя сетка" (старые турниры) и "Лига чемпионов — Верхняя сетка"
+  // (новые) НЕ склеиваются, даже если цветом они совпадают, это разные титулы.
+  const groupedTitles = [];
+  const groupIndex = {};
+  titleAchievements.forEach((t) => {
+    const key = t.stage + "|||" + t.bracket;
+    if (groupIndex[key] === undefined) {
+      groupIndex[key] = groupedTitles.length;
+      groupedTitles.push({ stage: t.stage, bracket: t.bracket, color: t.color, tournamentNames: [t.tournamentName] });
+    } else {
+      groupedTitles[groupIndex[key]].tournamentNames.push(t.tournamentName);
+    }
+  });
+
+  return { totals, history, titleAchievements: groupedTitles };
 }
 
-function PlayerDetailModal({ playerName, tournaments, onClose, zIndex = 50 }) {
+function PlayerDetailModal({ playerName, tournaments, onClose, zIndex = 50, titlesEnabled = true }) {
   const detail = useMemo(() => computePlayerDetail(tournaments, playerName), [tournaments, playerName]);
   const { totals, history, titleAchievements } = detail;
   const [openTournamentId, setOpenTournamentId] = useState(null);
@@ -1370,19 +1664,23 @@ function PlayerDetailModal({ playerName, tournaments, onClose, zIndex = 50 }) {
         </div>
 
         <div className="px-5 py-4 shrink-0">
-          {titleAchievements.length > 0 && (
+          {titlesEnabled && titleAchievements.length > 0 && (
             <div className="mb-4">
               <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2">Титулы</h3>
               <div className="flex flex-wrap gap-1.5">
-                {titleAchievements.map((t, i) => (
-                  <span
-                    key={i}
-                    className="inline-flex items-center gap-1 bg-amber-100 border border-amber-300 text-amber-900 text-xs px-2 py-1 rounded-full"
-                  >
-                    <Trophy size={11} className="text-amber-600 shrink-0" />
-                    {t.tournamentName} — {t.stage} ({t.bracket})
-                  </span>
-                ))}
+                {titleAchievements.map((t, i) => {
+                  const c = bracketColorClasses(t.bracket, t.color);
+                  const count = t.tournamentNames.length;
+                  return (
+                    <span
+                      key={i}
+                      className={`inline-flex items-center gap-1 ${c.bg} border ${c.border} ${c.text} text-xs px-2 py-1 rounded-full`}
+                    >
+                      <Trophy size={11} className={`${c.icon} shrink-0`} />
+                      {count > 1 ? `${count}× ` : ""}{t.stage} ({t.bracket}) — {t.tournamentNames.join(", ")}
+                    </span>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1442,6 +1740,7 @@ function PlayerDetailModal({ playerName, tournaments, onClose, zIndex = 50 }) {
           tournaments={tournaments}
           onClose={() => setOpenTournamentId(null)}
           zIndex={zIndex + 10}
+          titlesEnabled={titlesEnabled}
         />
       )}
     </div>
@@ -1449,7 +1748,7 @@ function PlayerDetailModal({ playerName, tournaments, onClose, zIndex = 50 }) {
 }
 
 // Уровень A: список участников турнира со статистикой + титулами, отсортирован по %.
-function TournamentDetailModal({ tournament, tournaments, onClose, zIndex = 60 }) {
+function TournamentDetailModal({ tournament, tournaments, onClose, zIndex = 60, titlesEnabled = true }) {
   const sortedRows = useMemo(() => [...tournament.rows].sort((a, b) => b.pct - a.pct), [tournament]);
   const [selectedPlayer, setSelectedPlayer] = useState(null);
 
@@ -1491,13 +1790,16 @@ function TournamentDetailModal({ tournament, tournaments, onClose, zIndex = 60 }
                     <td className="py-1.5 px-2 text-slate-400 tabular-nums">{i + 1}</td>
                     <td className="py-1.5 px-2 text-slate-900 font-medium">
                       {r.name}
-                      {(r.titles || []).length > 0 && (
+                      {titlesEnabled && (r.titles || []).length > 0 && (
                         <div className="flex flex-wrap gap-1 mt-0.5">
-                          {r.titles.map((t, ti) => (
-                            <span key={ti} className="inline-flex items-center gap-0.5 bg-amber-100 border border-amber-300 text-amber-800 text-[10px] px-1.5 py-0.5 rounded-full">
-                              <Trophy size={9} className="text-amber-600" />{t.stage}
-                            </span>
-                          ))}
+                          {r.titles.map((t, ti) => {
+                            const c = bracketColorClasses(t.bracket, t.color);
+                            return (
+                              <span key={ti} className={`inline-flex items-center gap-0.5 ${c.bg} border ${c.border} ${c.text} text-[10px] px-1.5 py-0.5 rounded-full`}>
+                                <Trophy size={9} className={c.icon} />{t.stage}
+                              </span>
+                            );
+                          })}
                         </div>
                       )}
                     </td>
@@ -1525,6 +1827,7 @@ function TournamentDetailModal({ tournament, tournaments, onClose, zIndex = 60 }
           tournaments={tournaments}
           onClose={() => setSelectedPlayer(null)}
           zIndex={zIndex + 10}
+          titlesEnabled={titlesEnabled}
         />
       )}
     </div>
@@ -1810,7 +2113,7 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
   );
 }
 
-function PublicView({ tournaments, cutoffs, isAdmin }) {
+function PublicView({ tournaments, cutoffs, isAdmin, titlesEnabled }) {
   const [format, setFormat] = useState("solo");
   const [mode, setMode] = useState("public");
   const [query, setQuery] = useState("");
@@ -1934,6 +2237,7 @@ function PublicView({ tournaments, cutoffs, isAdmin }) {
           playerName={modalPlayerName}
           tournaments={modalTournaments}
           onClose={() => setSelectedPlayer(null)}
+          titlesEnabled={titlesEnabled}
         />
       )}
     </div>
@@ -2179,6 +2483,11 @@ function TournamentEditModal({ tournament, onClose, onSave }) {
                         onChange={(e) => updateField(i, "name", e.target.value)}
                         className="w-full bg-white border border-slate-300 rounded px-1.5 py-1 text-xs"
                       />
+                      <TitlesEditor
+                        titles={r.titles || []}
+                        bracketOptions={tournament.bracketNames}
+                        onChange={(newTitles) => updateField(i, "titles", newTitles)}
+                      />
                     </td>
                     <td className="py-1 px-1">{numField(i, "played")}</td>
                     <td className="py-1 px-1">{numField(i, "wins")}</td>
@@ -2270,7 +2579,7 @@ function TournamentRow({ index, tournament, onRename, onRemove, onEditContents }
   );
 }
 
-function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster, addToRoster, removeFromRoster, restoreAll }) {
+function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled }) {
   const [format, setFormat] = useState("solo");
   const [file, setFile] = useState(null);
   const [name, setName] = useState("");
@@ -2493,6 +2802,20 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
 
   return (
     <div className="space-y-8">
+      <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-5 flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-slate-800 font-semibold">Показ титулов на сайте</h3>
+          <p className="text-xs text-slate-500 mt-0.5">Если выключено — титулы нигде не отображаются (карточка игрока, карточка турнира), даже если они уже посчитаны и сохранены.</p>
+        </div>
+        <button
+          onClick={() => setTitlesEnabled(!titlesEnabled)}
+          className={`shrink-0 relative w-12 h-7 rounded-full transition-colors ${titlesEnabled ? "" : "bg-slate-300"}`}
+          style={titlesEnabled ? { backgroundColor: BRAND_BLUE } : undefined}
+        >
+          <span className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${titlesEnabled ? "translate-x-6" : "translate-x-1"}`} />
+        </button>
+      </div>
+
       <BackupPanel tournaments={tournaments} cutoffs={cutoffs} roster={roster} restoreAll={restoreAll} />
 
       <HistoryImport tournaments={tournaments} saveTournaments={saveTournaments} addToRoster={addToRoster} />
@@ -3200,7 +3523,7 @@ function AdminGate({ onUnlock }) {
 }
 
 export default function RatingSite() {
-  const { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll } = useStorage();
+  const { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled } = useStorage();
   const [tab, setTab] = useState("rating");
   const [adminAuthed, setAdminAuthed] = useState(false);
 
@@ -3234,7 +3557,7 @@ export default function RatingSite() {
         {!loaded ? (
           <p className="text-slate-500 text-sm">Загрузка...</p>
         ) : tab === "rating" ? (
-          <PublicView tournaments={tournaments} cutoffs={cutoffs} isAdmin={adminAuthed} />
+          <PublicView tournaments={tournaments} cutoffs={cutoffs} isAdmin={adminAuthed} titlesEnabled={titlesEnabled} />
         ) : tab === "matrix" ? (
           <MatrixView tournaments={tournaments} cutoffs={cutoffs} />
         ) : adminAuthed ? (
@@ -3245,7 +3568,7 @@ export default function RatingSite() {
             >
               ← Назад к рейтингу
             </button>
-            <AdminImport tournaments={tournaments} saveTournaments={saveTournaments} saveCutoff={saveCutoff} cutoffs={cutoffs} roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} restoreAll={restoreAll} />
+            <AdminImport tournaments={tournaments} saveTournaments={saveTournaments} saveCutoff={saveCutoff} cutoffs={cutoffs} roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} restoreAll={restoreAll} titlesEnabled={titlesEnabled} setTitlesEnabled={setTitlesEnabled} />
           </div>
         ) : (
           <div>
@@ -3273,4 +3596,3 @@ export default function RatingSite() {
     </div>
   );
 }
-
