@@ -2027,13 +2027,15 @@ function MatrixView({ tournaments, cutoffs }) {
 // вообще нет в соло-рейтинге (никогда не играли соло), но у них есть пара с рейтингом ≤50 —
 // такие тоже считаются "слабыми" и добавляются в список. Ретро не учитывается вовсе.
 function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
+  // Чемпионшип считается по рейтингу "за всё время" (без учёта отсечки "актуального"
+  // рейтинга) — и для соло, и для пары.
   const soloStandings = useMemo(
-    () => computeStandings(tournaments.solo || [], "public", cutoffs.solo),
-    [tournaments.solo, cutoffs.solo]
+    () => computeStandings(tournaments.solo || [], "all", null),
+    [tournaments.solo]
   );
   const pairStandings = useMemo(
-    () => computeStandings(tournaments.pair || [], "public", cutoffs.pair),
-    [tournaments.pair, cutoffs.pair]
+    () => computeStandings(tournaments.pair || [], "all", null),
+    [tournaments.pair]
   );
 
   const rows = useMemo(() => {
@@ -2075,8 +2077,9 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
   return (
     <div>
       <p className="text-xs text-slate-500 mb-4">
-        Игроки с рейтингом 50 и ниже: показан соло-рейтинг — а если игрок никогда не играл
-        соло, то рейтинг той пары, за которую он выступает (ретро не учитывается).
+        Игроки с рейтингом 50 и ниже (за всё время, без учёта отсечки актуального
+        рейтинга): показан соло-рейтинг — а если игрок никогда не играл соло, то рейтинг
+        той пары, за которую он выступает (ретро не учитывается).
       </p>
       <div className="overflow-hidden rounded-xl border border-slate-300">
         <table className="w-full text-sm">
