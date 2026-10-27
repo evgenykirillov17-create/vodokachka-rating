@@ -4,10 +4,29 @@
 
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, deleteDoc } from "firebase/firestore";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 import { firebaseConfig } from "./firebaseConfig";
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const auth = getAuth(app);
+
+// Единственный аккаунт админа. Это не настоящая почта — просто логин в Firebase.
+// Пароль хранится только в Firebase (Authentication → Users), в коде его нет.
+export const ADMIN_EMAIL = "admin@vodokachka.app";
+
+export async function adminSignIn(password) {
+  await signInWithEmailAndPassword(auth, ADMIN_EMAIL, password);
+}
+
+export async function adminSignOut() {
+  await signOut(auth);
+}
+
+// Вызывает cb(true/false) при входе/выходе. Вход запоминается в браузере.
+export function onAdminChange(cb) {
+  return onAuthStateChanged(auth, (user) => cb(!!user && user.email === ADMIN_EMAIL));
+}
 
 const COLLECTION = "ratingApp";
 
@@ -20,7 +39,12 @@ export async function storageGet(key) {
 
 export async function storageSet(key, value) {
   const ref = doc(db, COLLECTION, key);
-  await setDoc(ref, { value, updatedAt: new Date().toISOString() });
+  try {
+    await setDoc(ref, { value, updatedAt: new Date().toISOString() });
+  } catch (e) {
+    alert("Не сохранилось в базу: " + (e.code === "permission-denied" ? "нет прав — выйдите и войдите в админку заново." : e.message));
+    throw e;
+  }
   return { key, value };
 }
 
