@@ -121,6 +121,7 @@ function newRecord(name) {
     semi: { top: false, mid: false, low: false },
     final: { top: false, mid: false, low: false },
     reachedLCH: false,
+    thirdPlaceTop: false, // выиграл матч за 3-е место в Верхней сетке ЛЧ — бонус +1,5
     bracketStage: {}, // название сетки (как в файле, дословно) -> "semi" | "final" | "champion"
   };
 }
@@ -308,6 +309,7 @@ function computeBracket(wb, players, bracketOrder) {
       thirdPlaceMatch.forEach(({ name, isWinner }) => {
         const p = players[name] || (players[name] = newRecord(name));
         p.bracketStage[title] = isWinner ? "third" : "fourth";
+        if (isWinner && category === "top") p.thirdPlaceTop = true;
       });
 
       i = r;
@@ -320,7 +322,9 @@ function computeBracket(wb, players, bracketOrder) {
 // Формула очков (с 29.10.2026, действует только для новых импортов — у уже загруженных
 // турниров рейтинг сохранён и не пересчитывается):
 //   8 стартовых за участие, группа: победа 2 / ничья 1,
-//   победа в плей-офф: ЛЧ 3, ЛЕ 2, ЛК 1,25, + бонусы за полуфинал/финал и выход в ЛЧ.
+//   победа в плей-офф: ЛЧ 3, ЛЕ 2, ЛК 1,25, + бонусы за полуфинал/финал и выход в ЛЧ,
+//   + 1,5 за победу в матче за 3-е место Верхней сетки ЛЧ (чтобы 3-е место ВС было выше
+//   победителя Нижней сетки, у которого бонусы и за полуфинал, и за финал НС).
 // Рейтинг за турнир = очки / максимум возможных очков турнира × 100 (не меньше MIN_RATING).
 // Раньше делили на число сыгранных матчей — из-за этого лишняя победа в плей-офф могла
 // снижать рейтинг (победитель ЛК оказывался ниже вылетевших в первом матче).
@@ -340,6 +344,7 @@ function computeO(p) {
   if (p.semi.low) o += 1;
   if (p.final.low) o += 1;
   if (p.reachedLCH) o += 4;
+  if (p.thirdPlaceTop) o += 1.5;
   return o;
 }
 
