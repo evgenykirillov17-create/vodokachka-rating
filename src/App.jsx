@@ -1517,6 +1517,61 @@ function useStorage() {
     }
   }, [specialPrizes]);
 
+  // Переименование человека везде: соло/ретро-строки, части пар (в т.ч. записанные только
+  // фамилией, если она однозначно указывает на этого человека), каталог и спецпризы.
+  // Если новое имя уже есть — это объединение двух записей в одного человека.
+  const renamePlayer = useCallback(async (oldName, newName) => {
+    const resolve = makePersonResolver(tournaments, roster);
+    const renameOne = (raw) => (resolve(raw) === oldName ? newName : raw);
+    let changedRows = 0;
+    const conflicts = [];
+    const nextT = {};
+    FORMATS.forEach((f) => {
+      let formatChanged = false;
+      nextT[f.id] = (tournaments[f.id] || []).map((t) => {
+        let tChanged = false;
+        const rows = t.rows.map((r) => {
+          const nm = r.name.includes("/")
+            ? canonicalizePairName(extractFullNames(r.name).map(renameOne).join("/"))
+            : renameOne(r.name);
+          if (nm === r.name) return r;
+          tChanged = true;
+          changedRows++;
+          return { ...r, name: nm };
+        });
+        if (!tChanged) return t;
+        const names = rows.map((r) => r.name);
+        const pairWithSelf = rows.some((r) => { const ps = extractFullNames(r.name); return ps.length > 1 && new Set(ps).size !== ps.length; });
+        if (new Set(names).size !== names.length || pairWithSelf) conflicts.push(t.name);
+        formatChanged = true;
+        return { ...t, rows };
+      });
+      if (!formatChanged) nextT[f.id] = null; // формат не менялся — не перезаписываем
+    });
+    if (conflicts.length) {
+      throw new Error(`«${oldName}» и «${newName}» оба играли в одном турнире (${conflicts.join(", ")}) — это точно разные люди, объединять нельзя.`);
+    }
+    for (const f of FORMATS) {
+      if (nextT[f.id]) await storageSet(`tournaments:${f.id}`, nextT[f.id]);
+    }
+    // В каталоге: старое имя убираем, новое добавляем (без дублей).
+    const nextRoster = Array.from(new Set(roster.filter((n) => n !== oldName).concat([newName]))).sort();
+    await storageSet("roster", nextRoster);
+    let nextPrizes = specialPrizes;
+    if (specialPrizes.includes(oldName)) {
+      nextPrizes = Array.from(new Set(specialPrizes.map((n) => (n === oldName ? newName : n)))).sort((a, b) => a.localeCompare(b, "ru"));
+      await storageSet("specialPrizes", nextPrizes);
+    }
+    setTournaments((prev) => {
+      const out = { ...prev };
+      FORMATS.forEach((f) => { if (nextT[f.id]) out[f.id] = nextT[f.id]; });
+      return out;
+    });
+    setRoster(nextRoster);
+    setSpecialPrizes(nextPrizes);
+    return changedRows;
+  }, [tournaments, roster, specialPrizes]);
+
   // Полное восстановление из бэкапа (экспорт/импорт JSON) — перезаписывает всё целиком,
   // а не сливает с текущим состоянием.
   const restoreAll = useCallback(async (backup) => {
@@ -1538,7 +1593,7 @@ function useStorage() {
     setRoster(nextR);
   }, []);
 
-  return { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize };
+  return { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize, renamePlayer };
 }
 
 function MedalBadge({ rank }) {
@@ -3541,17 +3596,21 @@ function RosterPanel({ roster, addToRoster, removeFromRoster }) {
 // Пары ("Имя1 Фамилия1/Имя2 Фамилия2") раскладываются на двух людей. Если в паре записана
 // только фамилия ("Отрошко/Кутепов") — ищем полное имя по каталогу и соло/ретро-составу;
 // при единственном совпадении засчитываем этому человеку, иначе оставляем как есть.
-function computeAttendance(tournaments, roster) {
+function makePersonResolver(tournaments, roster) {
   const known = new Set(roster);
   FORMATS.forEach((f) => (tournaments[f.id] || []).forEach((t) => t.rows.forEach((r) => {
     extractFullNames(r.name).forEach((n) => { if (/\s/.test(n)) known.add(n); });
   })));
   const surnameIndex = buildSurnameIndex(Array.from(known));
-  const resolvePerson = (raw) => {
+  return (raw) => {
     if (/\s/.test(raw)) return raw;
     const matches = surnameIndex[raw.toLowerCase()];
     return matches && matches.length === 1 ? matches[0] : raw;
   };
+}
+
+function computeAttendance(tournaments, roster) {
+  const resolvePerson = makePersonResolver(tournaments, roster);
 
   const people = {};
   FORMATS.forEach((f) => {
@@ -3572,8 +3631,33 @@ function computeAttendance(tournaments, roster) {
   return Object.values(people).sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "ru"));
 }
 
-function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPrize }) {
+function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPrize, renamePlayer }) {
   const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState(null); // имя, которое сейчас редактируется
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState(null); // { ok, text }
+
+  const startEdit = (name) => { setEditing(name); setDraft(name); setMessage(null); };
+  const cancelEdit = () => { setEditing(null); setDraft(""); };
+  const saveEdit = async () => {
+    const oldName = editing;
+    const newName = draft.trim().replace(/\s+/g, " ");
+    if (!newName || newName === oldName) { cancelEdit(); return; }
+    if (newName.includes("/")) { setMessage({ ok: false, text: "В имени не должно быть «/»." }); return; }
+    const exists = rows.some((r) => r.name === newName);
+    if (exists && !window.confirm(`Игрок «${newName}» уже есть в списке. Объединить «${oldName}» с ним в одного человека? Все турниры «${oldName}» перейдут к «${newName}».`)) return;
+    setBusy(true);
+    try {
+      const n = await renamePlayer(oldName, newName);
+      setMessage({ ok: true, text: `Готово: «${oldName}» → «${newName}». Изменено записей в турнирах: ${n}.` });
+      cancelEdit();
+    } catch (e) {
+      setMessage({ ok: false, text: e.message || String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
   const rows = useMemo(() => computeAttendance(tournaments, roster), [tournaments, roster]);
   const prizeSet = useMemo(() => new Set(specialPrizes), [specialPrizes]);
   const filtered = query ? rows.filter((r) => normalizeForSearch(r.name).includes(normalizeForSearch(query))) : rows;
@@ -3585,8 +3669,12 @@ function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPriz
       </h3>
       <p className="text-xs text-slate-500 mb-4">
         Сколько турниров сыграл каждый участник — соло, пара и ретро вместе. Галочка «Приз» —
-        спецприз получен; сохраняется сразу и видна только в админке. Всего участников: {rows.length}, со спецпризом: {specialPrizes.length}.
+        спецприз получен; сохраняется сразу и видна только в админке. Карандаш у имени — переименовать
+        игрока везде на сайте (если такое имя уже есть — записи объединятся). Всего участников: {rows.length}, со спецпризом: {specialPrizes.length}.
       </p>
+      {message && (
+        <p className={`text-xs mb-3 ${message.ok ? "text-emerald-700" : "text-red-600"}`}>{message.text}</p>
+      )}
 
       <div className="relative mb-4">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
@@ -3627,7 +3715,27 @@ function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPriz
                       className="w-4 h-4 cursor-pointer accent-emerald-600 align-middle"
                     />
                   </td>
-                  <td className="py-2 px-1 sm:px-3 text-slate-900 font-medium">{r.name}</td>
+                  <td className="py-2 px-1 sm:px-3 text-slate-900 font-medium">
+                    {editing === r.name ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          autoFocus
+                          value={draft}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") cancelEdit(); }}
+                          disabled={busy}
+                          className="w-full min-w-[8rem] bg-white border border-slate-300 rounded px-2 py-1 text-sm"
+                        />
+                        <button onClick={saveEdit} disabled={busy} className="text-emerald-600 hover:text-emerald-800 p-1" title="Сохранить"><Check size={16} /></button>
+                        <button onClick={cancelEdit} disabled={busy} className="text-slate-400 hover:text-slate-700 p-1" title="Отмена"><X size={16} /></button>
+                      </div>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5">
+                        {r.name}
+                        <button onClick={() => startEdit(r.name)} className="text-slate-300 hover:text-slate-600" title="Переименовать"><Pencil size={13} /></button>
+                      </span>
+                    )}
+                  </td>
                   <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.solo || "—"}</td>
                   <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.pair || "—"}</td>
                   <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.retro || "—"}</td>
@@ -3688,7 +3796,7 @@ function AdminGate() {
 }
 
 export default function RatingSite() {
-  const { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize } = useStorage();
+  const { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize, renamePlayer } = useStorage();
   const [tab, setTab] = useState("rating");
   const [adminSection, setAdminSection] = useState("manage"); // "manage" | "attendance"
   const [adminAuthed, setAdminAuthed] = useState(false);
@@ -3759,7 +3867,7 @@ export default function RatingSite() {
               ))}
             </div>
             {adminSection === "attendance" ? (
-              <AttendancePanel tournaments={tournaments} roster={roster} specialPrizes={specialPrizes} toggleSpecialPrize={toggleSpecialPrize} />
+              <AttendancePanel tournaments={tournaments} roster={roster} specialPrizes={specialPrizes} toggleSpecialPrize={toggleSpecialPrize} renamePlayer={renamePlayer} />
             ) : (
               <AdminImport tournaments={tournaments} saveTournaments={saveTournaments} saveCutoff={saveCutoff} cutoffs={cutoffs} roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} restoreAll={restoreAll} titlesEnabled={titlesEnabled} setTitlesEnabled={setTitlesEnabled} specialPrizes={specialPrizes} />
             )}
