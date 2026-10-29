@@ -111,7 +111,8 @@ function newRecord(name) {
     groupLosses: 0,
     groupGoalsFor: 0,
     groupGoalsAgainst: 0,
-    playoffWins: 0,
+    playoffWins: 0, // победы в ЛЧ (ВС, НС, матч за 3-е место) — 3 очка
+    europaWins: 0, // победы в Лиге Европы — 2 очка
     playoffLosses: 0,
     playoffGoalsFor: 0,
     playoffGoalsAgainst: 0,
@@ -208,6 +209,7 @@ function computePlayoffStats(wb, players) {
       // не для самого факта победы: некоторые этапы (например "3М" — матч за 3-е место)
       // не попадают ни в один известный бонусный блок, но победа в них всё равно победа.
       if (category === "intertoto") p.intertotoWins++;
+      else if (category === "low") p.europaWins++;
       else p.playoffWins++;
       const loser = winner === p1 ? p2 : winner === p2 ? p1 : null;
       if (loser) (players[loser] || (players[loser] = newRecord(loser))).playoffLosses++;
@@ -315,11 +317,21 @@ function computeBracket(wb, players, bracketOrder) {
   }
 }
 
+// Формула очков (с 29.10.2026, действует только для новых импортов — у уже загруженных
+// турниров рейтинг сохранён и не пересчитывается):
+//   8 стартовых за участие, группа: победа 2 / ничья 1,
+//   победа в плей-офф: ЛЧ 3, ЛЕ 2, ЛК 1,25, + бонусы за полуфинал/финал и выход в ЛЧ.
+// Рейтинг за турнир = очки / максимум возможных очков турнира × 100 (не меньше MIN_RATING).
+// Раньше делили на число сыгранных матчей — из-за этого лишняя победа в плей-офф могла
+// снижать рейтинг (победитель ЛК оказывался ниже вылетевших в первом матче).
+const START_POINTS = 8;
+
 function computeO(p) {
-  let o = 4;
+  let o = START_POINTS;
   o += p.groupWins * 2;
   o += p.groupDraws * 1;
   o += p.playoffWins * 3;
+  o += p.europaWins * 2;
   o += p.intertotoWins * 1.25;
   if (p.semi.top) o += 2;
   if (p.final.top) o += 2;
@@ -1228,7 +1240,7 @@ function parseTournamentFile(wb) {
   computeBracket(wb, players, bracketOrder);
 
   const R = Math.log2(vsSize);
-  const idealO = 4 + G * 2 + R * 3 + 2 + 2 + 4;
+  const idealO = START_POINTS + G * 2 + R * 3 + 2 + 2 + 4; // путь победителя ЛЧ ВС без ничьих
   const idealMatches = G + R;
   const idealNorm = (idealO / idealMatches) * 10;
 
@@ -1236,8 +1248,8 @@ function parseTournamentFile(wb) {
     const played = G + p.poMatches;
     const O = computeO(p);
     const norm = played > 0 ? (O / played) * 10 : 0;
-    const pct = idealNorm > 0 ? (norm / idealNorm) * 100 : 0;
-    const wins = p.groupWins + p.playoffWins + p.intertotoWins;
+    const pct = idealO > 0 ? (O / idealO) * 100 : 0;
+    const wins = p.groupWins + p.playoffWins + p.europaWins + p.intertotoWins;
     const draws = p.groupDraws;
     const losses = p.groupLosses + p.playoffLosses;
     const goalsFor = p.groupGoalsFor + p.playoffGoalsFor;
@@ -1257,7 +1269,7 @@ function parseTournamentFile(wb) {
   rows.sort((a, b) => b.pct - a.pct);
   return {
     rows,
-    meta: { G, vsSize, R, idealO: round3(idealO), idealNorm: round3(idealNorm) },
+    meta: { G, vsSize, R, idealO: round3(idealO), idealNorm: round3(idealNorm), formula: "v2-2026-10-29" },
     bracketNames: bracketOrder,
   };
 }
@@ -2983,7 +2995,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
               </div>
             )}
             <p className="text-xs text-slate-600 mb-2">
-              Проверка: G={preview.meta.G}, верхняя сетка={preview.meta.vsSize}, максимум %={100}, идеальные очки/матч={preview.meta.idealNorm}
+              Проверка: G={preview.meta.G}, верхняя сетка={preview.meta.vsSize}, максимум очков={preview.meta.idealO}
             </p>
 
             {format === "pair" && Object.keys(pairMap).length > 0 && (
