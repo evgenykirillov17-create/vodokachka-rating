@@ -1431,6 +1431,7 @@ function useStorage() {
   const [cutoffs, setCutoffs] = useState({ solo: null, pair: null, retro: null });
   const [roster, setRoster] = useState([]); // список известных полных имён игроков
   const [titlesEnabled, setTitlesEnabledState] = useState(true); // показывать ли титулы на сайте
+  const [specialPrizes, setSpecialPrizes] = useState([]); // имена игроков, получивших спецприз (галочки в админке)
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -1450,7 +1451,10 @@ function useStorage() {
       if (rRes && rRes.value) nextRoster = rRes.value;
       const tsRes = await storageGet("settings:titlesEnabled");
       if (tsRes && tsRes.value) nextTitlesEnabled = tsRes.value.enabled;
+      const spRes = await storageGet("specialPrizes");
+      const nextSpecialPrizes = spRes && Array.isArray(spRes.value) ? spRes.value : [];
       if (!cancelled) {
+        setSpecialPrizes(nextSpecialPrizes);
         setTournaments(nextT);
         setCutoffs(nextC);
         setRoster(nextRoster);
@@ -1501,6 +1505,18 @@ function useStorage() {
     await storageSet("settings:titlesEnabled", { enabled });
   }, []);
 
+  const toggleSpecialPrize = useCallback(async (name) => {
+    const next = specialPrizes.includes(name)
+      ? specialPrizes.filter((n) => n !== name)
+      : [...specialPrizes, name].sort((a, b) => a.localeCompare(b, "ru"));
+    setSpecialPrizes(next);
+    try {
+      await storageSet("specialPrizes", next);
+    } catch (e) {
+      setSpecialPrizes(specialPrizes); // не сохранилось — откатываем галочку
+    }
+  }, [specialPrizes]);
+
   // Полное восстановление из бэкапа (экспорт/импорт JSON) — перезаписывает всё целиком,
   // а не сливает с текущим состоянием.
   const restoreAll = useCallback(async (backup) => {
@@ -1512,12 +1528,17 @@ function useStorage() {
       await storageSet(`cutoff:${f.id}`, { id: nextC[f.id] || null });
     }
     await storageSet("roster", nextR);
+    // В старых бэкапах спецпризов нет — тогда текущие галочки не трогаем.
+    if (Array.isArray(backup.specialPrizes)) {
+      await storageSet("specialPrizes", backup.specialPrizes);
+      setSpecialPrizes(backup.specialPrizes);
+    }
     setTournaments(nextT);
     setCutoffs(nextC);
     setRoster(nextR);
   }, []);
 
-  return { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled };
+  return { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize };
 }
 
 function MedalBadge({ rank }) {
@@ -1639,6 +1660,13 @@ function computePlayerDetail(tournaments, playerName) {
 function PlayerDetailModal({ playerName, tournaments, onClose, zIndex = 50, titlesEnabled = true }) {
   const detail = useMemo(() => computePlayerDetail(tournaments, playerName), [tournaments, playerName]);
   const { totals, history, titleAchievements } = detail;
+  // Рейтинг — тот же расчёт, что и в таблице: среднее % за последние 3 турнира игрока в этом формате.
+  // history уже развёрнут (сначала последние), поэтому берём первые 3.
+  const rating = useMemo(() => {
+    const last3 = history.slice(0, 3);
+    if (last3.length === 0) return null;
+    return Math.round(last3.reduce((s, x) => s + (x.pct || 0), 0) / last3.length);
+  }, [history]);
   const [openTournamentId, setOpenTournamentId] = useState(null);
   const openTournament = openTournamentId ? tournaments.find((t) => t.id === openTournamentId) : null;
 
@@ -1656,8 +1684,16 @@ function PlayerDetailModal({ playerName, tournaments, onClose, zIndex = 50, titl
         onClick={(e) => e.stopPropagation()}
       >
         <div className="shrink-0 bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between rounded-t-2xl">
-          <h2 className="text-slate-900 font-semibold text-base">{playerName}</h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-700">
+          <div className="flex items-baseline gap-3 min-w-0 flex-wrap">
+            <h2 className="text-slate-900 font-semibold text-base">{playerName}</h2>
+            {rating !== null && (
+              <span className="flex items-baseline gap-1 shrink-0">
+                <span className="font-mono font-bold text-lg tabular-nums" style={{ color: BRAND_RED }}>{rating}</span>
+                <span className="text-[11px] uppercase tracking-wide text-slate-500">рейтинг</span>
+              </span>
+            )}
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-700 shrink-0">
             <X size={18} />
           </button>
         </div>
@@ -2051,7 +2087,7 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
 
     const result = [];
     soloStandings.forEach((s) => {
-      if (s.avg <= 50) result.push({ name: s.name, rating: s.avg, source: "solo", pairName: null });
+      if (s.avg <= 50) result.push({ name: s.name, rating: s.avg, played: s.tournamentsPlayed, source: "solo", pairName: null });
     });
 
     const seenFallback = new Set();
@@ -2061,7 +2097,7 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
         if (hasSoloRecord(person)) return; // если игрок есть в соло (точно или по фамилии) — судим только по соло
         if (seenFallback.has(person)) return;
         seenFallback.add(person);
-        result.push({ name: person, rating: s.avg, source: "pair", pairName: s.name });
+        result.push({ name: person, rating: s.avg, played: s.tournamentsPlayed, source: "pair", pairName: s.name });
       });
     });
 
@@ -2078,7 +2114,8 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
       <p className="text-xs text-slate-500 mb-4">
         Игроки с рейтингом 50 и ниже (за всё время, без учёта отсечки актуального
         рейтинга): показан соло-рейтинг — а если игрок никогда не играл соло, то рейтинг
-        той пары, за которую он выступает (ретро не учитывается).
+        той пары, за которую он выступает (ретро не учитывается). «Турниров» — сколько
+        турниров сыграно в том формате, по которому посчитан рейтинг.
       </p>
       <div className="overflow-hidden rounded-xl border border-slate-300">
         <table className="w-full text-sm">
@@ -2086,6 +2123,10 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
             <tr className="bg-slate-200/80 text-slate-700 text-left uppercase tracking-normal sm:tracking-wide text-xs">
               <th className="py-3 pl-3 pr-1 w-8 font-medium">#</th>
               <th className="py-3 px-1 sm:px-4 font-medium">Игрок</th>
+              <th className="py-3 px-1 sm:px-4 font-medium text-right">
+                <span className="sm:hidden">Турн.</span>
+                <span className="hidden sm:inline">Турниров</span>
+              </th>
               <th className="py-3 pl-1 pr-3 sm:px-4 font-medium text-right">Рейтинг</th>
             </tr>
           </thead>
@@ -2098,6 +2139,7 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
               >
                 <td className="py-2.5 pl-3 pr-1 text-slate-400 tabular-nums">{i + 1}</td>
                 <td className="py-2.5 px-1 sm:px-4 text-slate-900 font-medium">{r.name}</td>
+                <td className="py-2.5 px-1 sm:px-4 text-right text-slate-600 tabular-nums">{r.played}</td>
                 <td className="py-2.5 pl-1 pr-3 sm:px-4 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>
                   {Math.round(r.rating)}
                 </td>
@@ -2105,7 +2147,7 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={3} className="py-6 text-center text-slate-400 text-sm">Никого не найдено</td>
+                <td colSpan={4} className="py-6 text-center text-slate-400 text-sm">Никого не найдено</td>
               </tr>
             )}
           </tbody>
@@ -2581,7 +2623,7 @@ function TournamentRow({ index, tournament, onRename, onRemove, onEditContents }
   );
 }
 
-function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled }) {
+function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes }) {
   const [format, setFormat] = useState("solo");
   const [file, setFile] = useState(null);
   const [name, setName] = useState("");
@@ -2818,7 +2860,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
         </button>
       </div>
 
-      <BackupPanel tournaments={tournaments} cutoffs={cutoffs} roster={roster} restoreAll={restoreAll} />
+      <BackupPanel tournaments={tournaments} cutoffs={cutoffs} roster={roster} specialPrizes={specialPrizes} restoreAll={restoreAll} />
 
       <HistoryImport tournaments={tournaments} saveTournaments={saveTournaments} addToRoster={addToRoster} />
 
@@ -3345,7 +3387,7 @@ function LegacyStatsImport({ tournaments, saveTournaments, addToRoster, roster }
   );
 }
 
-function BackupPanel({ tournaments, cutoffs, roster, restoreAll }) {
+function BackupPanel({ tournaments, cutoffs, roster, specialPrizes, restoreAll }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
 
@@ -3355,6 +3397,7 @@ function BackupPanel({ tournaments, cutoffs, roster, restoreAll }) {
       tournaments,
       cutoffs,
       roster,
+      specialPrizes,
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -3391,7 +3434,7 @@ function BackupPanel({ tournaments, cutoffs, roster, restoreAll }) {
     <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-5">
       <h3 className="text-slate-800 font-semibold mb-1">Бэкап всех данных</h3>
       <p className="text-xs text-slate-500 mb-4">
-        Скачайте JSON-файл со всеми турнирами, каталогом игроков и точками отсчёта — на случай сбоя
+        Скачайте JSON-файл со всеми турнирами, каталогом игроков, точками отсчёта и спецпризами — на случай сбоя
         или переноса на другую версию сайта. Импорт полностью заменяет текущие данные содержимым файла.
       </p>
       <div className="flex flex-wrap items-center gap-3">
@@ -3492,6 +3535,118 @@ function RosterPanel({ roster, addToRoster, removeFromRoster }) {
   );
 }
 
+// ---------- ПОСЕЩАЕМОСТЬ (только админка) ----------
+
+// Считает, сколько турниров сыграл каждый человек, суммарно по соло, паре и ретро.
+// Пары ("Имя1 Фамилия1/Имя2 Фамилия2") раскладываются на двух людей. Если в паре записана
+// только фамилия ("Отрошко/Кутепов") — ищем полное имя по каталогу и соло/ретро-составу;
+// при единственном совпадении засчитываем этому человеку, иначе оставляем как есть.
+function computeAttendance(tournaments, roster) {
+  const known = new Set(roster);
+  FORMATS.forEach((f) => (tournaments[f.id] || []).forEach((t) => t.rows.forEach((r) => {
+    extractFullNames(r.name).forEach((n) => { if (/\s/.test(n)) known.add(n); });
+  })));
+  const surnameIndex = buildSurnameIndex(Array.from(known));
+  const resolvePerson = (raw) => {
+    if (/\s/.test(raw)) return raw;
+    const matches = surnameIndex[raw.toLowerCase()];
+    return matches && matches.length === 1 ? matches[0] : raw;
+  };
+
+  const people = {};
+  FORMATS.forEach((f) => {
+    (tournaments[f.id] || []).forEach((t) => {
+      const seenHere = new Set(); // один человек — одно посещение турнира
+      t.rows.forEach((r) => {
+        extractFullNames(r.name).forEach((raw) => {
+          const person = resolvePerson(raw);
+          if (seenHere.has(person)) return;
+          seenHere.add(person);
+          if (!people[person]) people[person] = { name: person, solo: 0, pair: 0, retro: 0, total: 0 };
+          people[person][f.id] += 1;
+          people[person].total += 1;
+        });
+      });
+    });
+  });
+  return Object.values(people).sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "ru"));
+}
+
+function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPrize }) {
+  const [query, setQuery] = useState("");
+  const rows = useMemo(() => computeAttendance(tournaments, roster), [tournaments, roster]);
+  const prizeSet = useMemo(() => new Set(specialPrizes), [specialPrizes]);
+  const filtered = query ? rows.filter((r) => normalizeForSearch(r.name).includes(normalizeForSearch(query))) : rows;
+
+  return (
+    <div className="bg-slate-200/60 border border-slate-300 rounded-xl p-3 sm:p-5">
+      <h3 className="text-slate-800 font-semibold mb-1 flex items-center gap-2">
+        <Users size={18} /> Посещаемость и спецпризы
+      </h3>
+      <p className="text-xs text-slate-500 mb-4">
+        Сколько турниров сыграл каждый участник — соло, пара и ретро вместе. Галочка «Приз» —
+        спецприз получен; сохраняется сразу и видна только в админке. Всего участников: {rows.length}, со спецпризом: {specialPrizes.length}.
+      </p>
+
+      <div className="relative mb-4">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Найти игрока..."
+          className="w-full bg-white border border-slate-300 rounded-lg pl-9 pr-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-red-500"
+        />
+      </div>
+
+      <div className="overflow-x-auto rounded-xl border border-slate-300 bg-white">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-slate-200/80 text-slate-700 text-left uppercase tracking-normal sm:tracking-wide text-xs">
+              <th className="py-3 pl-3 pr-1 w-8 font-medium">#</th>
+              <th className="py-3 px-1 sm:px-3 font-medium text-center" title="Спецприз">Приз</th>
+              <th className="py-3 px-1 sm:px-3 font-medium">Игрок</th>
+              <th className="py-3 px-1 sm:px-3 font-medium text-right">Соло</th>
+              <th className="py-3 px-1 sm:px-3 font-medium text-right">Пара</th>
+              <th className="py-3 px-1 sm:px-3 font-medium text-right">Ретро</th>
+              <th className="py-3 pl-1 pr-3 sm:px-3 font-medium text-right">Всего</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r) => {
+              const rank = rows.indexOf(r) + 1;
+              const hasPrize = prizeSet.has(r.name);
+              return (
+                <tr key={r.name} className={`border-t border-slate-200 ${hasPrize ? "bg-emerald-50" : ""}`}>
+                  <td className="py-2 pl-3 pr-1 text-slate-400 tabular-nums">{rank}</td>
+                  <td className="py-2 px-1 sm:px-3 text-center">
+                    <input
+                      type="checkbox"
+                      checked={hasPrize}
+                      onChange={() => toggleSpecialPrize(r.name)}
+                      className="w-4 h-4 cursor-pointer accent-emerald-600 align-middle"
+                    />
+                  </td>
+                  <td className="py-2 px-1 sm:px-3 text-slate-900 font-medium">{r.name}</td>
+                  <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.solo || "—"}</td>
+                  <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.pair || "—"}</td>
+                  <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.retro || "—"}</td>
+                  <td className="py-2 pl-1 pr-3 sm:px-3 text-right font-mono font-semibold tabular-nums" style={{ color: BRAND_RED }}>{r.total}</td>
+                </tr>
+              );
+            })}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={7} className="py-6 text-center text-slate-400 text-sm">Никого не найдено</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function AdminGate() {
   const [code, setCode] = useState("");
   const [wrong, setWrong] = useState(false);
@@ -3533,8 +3688,9 @@ function AdminGate() {
 }
 
 export default function RatingSite() {
-  const { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled } = useStorage();
+  const { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize } = useStorage();
   const [tab, setTab] = useState("rating");
+  const [adminSection, setAdminSection] = useState("manage"); // "manage" | "attendance"
   const [adminAuthed, setAdminAuthed] = useState(false);
   useEffect(() => onAdminChange(setAdminAuthed), []);
 
@@ -3587,7 +3743,26 @@ export default function RatingSite() {
                 Выйти из админки
               </button>
             </div>
-            <AdminImport tournaments={tournaments} saveTournaments={saveTournaments} saveCutoff={saveCutoff} cutoffs={cutoffs} roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} restoreAll={restoreAll} titlesEnabled={titlesEnabled} setTitlesEnabled={setTitlesEnabled} />
+            <div className="flex gap-1 bg-slate-100 rounded-lg p-1 mb-6 w-fit">
+              {[
+                { id: "manage", label: "Турниры и настройки" },
+                { id: "attendance", label: "Посещаемость" },
+              ].map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => setAdminSection(s.id)}
+                  style={adminSection === s.id ? { backgroundColor: BRAND_BLUE } : undefined}
+                  className={`px-3 py-1.5 rounded-md text-sm ${adminSection === s.id ? "text-white" : "text-slate-600 hover:text-slate-800"}`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+            {adminSection === "attendance" ? (
+              <AttendancePanel tournaments={tournaments} roster={roster} specialPrizes={specialPrizes} toggleSpecialPrize={toggleSpecialPrize} />
+            ) : (
+              <AdminImport tournaments={tournaments} saveTournaments={saveTournaments} saveCutoff={saveCutoff} cutoffs={cutoffs} roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} restoreAll={restoreAll} titlesEnabled={titlesEnabled} setTitlesEnabled={setTitlesEnabled} specialPrizes={specialPrizes} />
+            )}
           </div>
         ) : (
           <div>
