@@ -122,6 +122,7 @@ function newRecord(name) {
     final: { top: false, mid: false, low: false },
     reachedLCH: false,
     thirdPlaceTop: false, // выиграл матч за 3-е место в Верхней сетке ЛЧ — бонус +1,5
+    championTop: false, // выиграл Верхнюю сетку ЛЧ (победитель турнира) — бонус +2
     bracketStage: {}, // название сетки (как в файле, дословно) -> "semi" | "final" | "champion"
   };
 }
@@ -302,6 +303,7 @@ function computeBracket(wb, players, bracketOrder) {
       if (champion) {
         const p = players[champion] || (players[champion] = newRecord(champion));
         p.bracketStage[title] = "champion";
+        if (category === "top") p.championTop = true;
       }
       // Матч за 3-е место — определяет титул точнее, чем общий "Полуфиналист", поэтому
       // переопределяем bracketStage напрямую (не через обычное "только если выше рангом",
@@ -324,7 +326,9 @@ function computeBracket(wb, players, bracketOrder) {
 //   8 стартовых за участие, группа: победа 2 / ничья 1,
 //   победа в плей-офф: ЛЧ 3, ЛЕ 2, ЛК 1,25, + бонусы за полуфинал/финал и выход в ЛЧ,
 //   + 1,5 за победу в матче за 3-е место Верхней сетки ЛЧ (чтобы 3-е место ВС было выше
-//   победителя Нижней сетки, у которого бонусы и за полуфинал, и за финал НС).
+//   победителя Нижней сетки, у которого бонусы и за полуфинал, и за финал НС),
+//   + 2 за победу в Верхней сетке ЛЧ (победитель турнира должен быть выше победителя НС,
+//   который может собрать бонусы за полуфинал в обеих сетках).
 // Рейтинг за турнир = очки / максимум возможных очков турнира × 100 (не меньше MIN_RATING).
 // Раньше делили на число сыгранных матчей — из-за этого лишняя победа в плей-офф могла
 // снижать рейтинг (победитель ЛК оказывался ниже вылетевших в первом матче).
@@ -345,6 +349,7 @@ function computeO(p) {
   if (p.final.low) o += 1;
   if (p.reachedLCH) o += 4;
   if (p.thirdPlaceTop) o += 1.5;
+  if (p.championTop) o += 2;
   return o;
 }
 
@@ -1245,7 +1250,7 @@ function parseTournamentFile(wb) {
   computeBracket(wb, players, bracketOrder);
 
   const R = Math.log2(vsSize);
-  const idealO = START_POINTS + G * 2 + R * 3 + 2 + 2 + 4; // путь победителя ЛЧ ВС без ничьих
+  const idealO = START_POINTS + G * 2 + R * 3 + 2 + 2 + 4 + 2; // путь победителя ЛЧ ВС без ничьих (вкл. бонус чемпиона)
   const idealMatches = G + R;
   const idealNorm = (idealO / idealMatches) * 10;
 
@@ -1274,7 +1279,7 @@ function parseTournamentFile(wb) {
   rows.sort((a, b) => b.pct - a.pct);
   return {
     rows,
-    meta: { G, vsSize, R, idealO: round3(idealO), idealNorm: round3(idealNorm), formula: "v2-2026-10-29" },
+    meta: { G, vsSize, R, idealO: round3(idealO), idealNorm: round3(idealNorm), formula: "v3-2026-11-02" },
     bracketNames: bracketOrder,
   };
 }
