@@ -3653,12 +3653,131 @@ function computeAttendance(tournaments, roster) {
   return Object.values(people).sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "ru"));
 }
 
+// Суммарная статистика человека по всем форматам: соло + все его пары + ретро.
+// Пары, записанные только фамилией, относятся к человеку так же, как в «Посещаемости».
+function computePersonTotals(tournaments, roster, person) {
+  const resolvePerson = makePersonResolver(tournaments, roster);
+  const groups = {}; // ключ строки разбивки → суммы
+  const add = (key, label, order, r) => {
+    const g = groups[key] || (groups[key] = { key, label, order, tournaments: 0, matches: 0, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0 });
+    g.tournaments += 1;
+    g.matches += Number(r.played) || 0;
+    g.wins += Number(r.wins) || 0;
+    g.draws += Number(r.draws) || 0;
+    g.losses += Number(r.losses) || 0;
+    g.goalsFor += Number(r.goalsFor) || 0;
+    g.goalsAgainst += Number(r.goalsAgainst) || 0;
+  };
+  FORMATS.forEach((f) => {
+    (tournaments[f.id] || []).forEach((t) => {
+      t.rows.forEach((r) => {
+        const parts = extractFullNames(r.name).map(resolvePerson);
+        if (!parts.includes(person)) return;
+        if (f.id === "pair" && parts.length > 1) {
+          const partner = parts.filter((p) => p !== person).join(", ") || person;
+          add("pair:" + partner, "Пара: " + partner, 1, r);
+        } else {
+          add(f.id, f.id === "solo" ? "Соло" : f.id === "retro" ? "Ретро" : "Пары", f.id === "solo" ? 0 : f.id === "retro" ? 2 : 1, r);
+        }
+      });
+    });
+  });
+  const rows = Object.values(groups).sort((a, b) => a.order - b.order || b.tournaments - a.tournaments || a.label.localeCompare(b.label, "ru"));
+  const total = rows.reduce((t, g) => {
+    ["tournaments", "matches", "wins", "draws", "losses", "goalsFor", "goalsAgainst"].forEach((k) => { t[k] += g[k]; });
+    return t;
+  }, { tournaments: 0, matches: 0, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0 });
+  return { rows, total };
+}
+
+function PersonTotalsModal({ person, tournaments, roster, onClose }) {
+  const { rows, total } = useMemo(() => computePersonTotals(tournaments, roster, person), [tournaments, roster, person]);
+  const diff = total.goalsFor - total.goalsAgainst;
+  const signed = (n) => (n > 0 ? "+" + n : String(n));
+  const winPct = total.matches ? Math.round((total.wins / total.matches) * 100) : 0;
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-start justify-center p-2 sm:p-4 overflow-y-auto" style={{ zIndex: 50 }} onClick={onClose}>
+      <div className="bg-slate-100 border border-slate-300 rounded-2xl w-full sm:max-w-xl flex flex-col shrink-0" onClick={(e) => e.stopPropagation()}>
+        <div className="shrink-0 bg-slate-100 border-b border-slate-200 px-5 py-4 flex items-center justify-between rounded-t-2xl">
+          <div className="min-w-0">
+            <h2 className="text-slate-900 font-semibold text-base">{person}</h2>
+            <p className="text-xs text-slate-500">Все форматы вместе: соло, все пары, ретро · турниров: {total.tournaments}</p>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-700 shrink-0">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 flex flex-col gap-4">
+          <div className="grid grid-cols-3 gap-2">
+            <StatBox label="Матчей" value={total.matches} />
+            <StatBox label="Победы" value={total.wins} accent="text-green-600" />
+            <StatBox label="Ничьи" value={total.draws} />
+            <StatBox label="Поражения" value={total.losses} accent="text-red-600" />
+            <StatBox label="Голы" value={`${total.goalsFor}–${total.goalsAgainst}`} />
+            <StatBox label="Разница голов" value={signed(diff)} accent={diff > 0 ? "text-green-600" : diff < 0 ? "text-red-600" : undefined} />
+          </div>
+          <p className="text-xs text-slate-500 -mt-2">Побед: {winPct}% матчей. «Голы» — забито–пропущено.</p>
+
+          {rows.length > 0 && (
+            <div>
+              <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2">По форматам и парам</h3>
+              <div className="overflow-x-auto rounded-lg border border-slate-300 bg-white">
+                <table className="w-full text-xs sm:text-sm tabular-nums">
+                  <thead>
+                    <tr className="bg-slate-200/80 text-slate-600 text-left text-[11px] uppercase">
+                      <th className="py-2 px-2 font-medium">Формат</th>
+                      <th className="py-2 px-1 font-medium text-right">Турн.</th>
+                      <th className="py-2 px-1 font-medium text-right">М</th>
+                      <th className="py-2 px-1 font-medium text-right">В-Н-П</th>
+                      <th className="py-2 px-1 font-medium text-right">Голы</th>
+                      <th className="py-2 pl-1 pr-2 font-medium text-right">+/−</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((g) => (
+                      <tr key={g.key} className="border-t border-slate-200">
+                        <td className="py-1.5 px-2 text-slate-800">{g.label}</td>
+                        <td className="py-1.5 px-1 text-right text-slate-600">{g.tournaments}</td>
+                        <td className="py-1.5 px-1 text-right text-slate-600">{g.matches}</td>
+                        <td className="py-1.5 px-1 text-right text-slate-600 whitespace-nowrap">{g.wins}-{g.draws}-{g.losses}</td>
+                        <td className="py-1.5 px-1 text-right text-slate-600 whitespace-nowrap">{g.goalsFor}–{g.goalsAgainst}</td>
+                        <td className="py-1.5 pl-1 pr-2 text-right font-medium text-slate-800">{signed(g.goalsFor - g.goalsAgainst)}</td>
+                      </tr>
+                    ))}
+                    <tr className="border-t-2 border-slate-300 font-semibold">
+                      <td className="py-1.5 px-2 text-slate-900">Итого</td>
+                      <td className="py-1.5 px-1 text-right">{total.tournaments}</td>
+                      <td className="py-1.5 px-1 text-right">{total.matches}</td>
+                      <td className="py-1.5 px-1 text-right whitespace-nowrap">{total.wins}-{total.draws}-{total.losses}</td>
+                      <td className="py-1.5 px-1 text-right whitespace-nowrap">{total.goalsFor}–{total.goalsAgainst}</td>
+                      <td className="py-1.5 pl-1 pr-2 text-right">{signed(diff)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-slate-500 mt-2">В парах матчи и голы — общие для пары: каждый матч пары засчитывается обоим игрокам.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPrize, renamePlayer }) {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null); // имя, которое сейчас редактируется
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null); // { ok, text }
+  const [openPerson, setOpenPerson] = useState(null); // чья суммарная статистика открыта
 
   const startEdit = (name) => { setEditing(name); setDraft(name); setMessage(null); };
   const cancelEdit = () => { setEditing(null); setDraft(""); };
@@ -3691,7 +3810,7 @@ function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPriz
       </h3>
       <p className="text-xs text-slate-500 mb-4">
         Сколько турниров сыграл каждый участник — соло, пара и ретро вместе. Галочка «Приз» —
-        спецприз получен; сохраняется сразу и видна только в админке. Карандаш у имени — переименовать
+        спецприз получен; сохраняется сразу и видна только в админке. Нажмите на имя — суммарная статистика по всем турнирам. Карандаш у имени — переименовать
         игрока везде на сайте (если такое имя уже есть — записи объединятся). Всего участников: {rows.length}, со спецпризом: {specialPrizes.length}.
       </p>
       {message && (
@@ -3753,7 +3872,13 @@ function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPriz
                       </div>
                     ) : (
                       <span className="inline-flex items-center gap-1.5">
-                        {r.name}
+                        <button
+                          onClick={() => setOpenPerson(r.name)}
+                          className="text-left hover:underline decoration-slate-400 underline-offset-2"
+                          title="Статистика по всем турнирам"
+                        >
+                          {r.name}
+                        </button>
                         <button onClick={() => startEdit(r.name)} className="text-slate-300 hover:text-slate-600" title="Переименовать"><Pencil size={13} /></button>
                       </span>
                     )}
@@ -3773,6 +3898,9 @@ function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPriz
           </tbody>
         </table>
       </div>
+      {openPerson && (
+        <PersonTotalsModal person={openPerson} tournaments={tournaments} roster={roster} onClose={() => setOpenPerson(null)} />
+      )}
     </div>
   );
 }
