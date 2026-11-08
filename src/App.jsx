@@ -3658,6 +3658,7 @@ function computeAttendance(tournaments, roster) {
 function computePersonTotals(tournaments, roster, person) {
   const resolvePerson = makePersonResolver(tournaments, roster);
   const groups = {}; // ключ строки разбивки → суммы
+  const titles = []; // все титулы человека во всех форматах
   const add = (key, label, order, r) => {
     const g = groups[key] || (groups[key] = { key, label, order, tournaments: 0, matches: 0, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0 });
     g.tournaments += 1;
@@ -3673,6 +3674,9 @@ function computePersonTotals(tournaments, roster, person) {
       t.rows.forEach((r) => {
         const parts = extractFullNames(r.name).map(resolvePerson);
         if (!parts.includes(person)) return;
+        (r.titles || []).forEach((title) => {
+          titles.push({ stage: title.stage, bracket: title.bracket, color: title.color, tournamentName: t.name, format: f.id });
+        });
         if (f.id === "pair" && parts.length > 1) {
           const partner = parts.filter((p) => p !== person).join(", ") || person;
           add("pair:" + partner, "Пара: " + partner, 1, r);
@@ -3687,11 +3691,32 @@ function computePersonTotals(tournaments, roster, person) {
     ["tournaments", "matches", "wins", "draws", "losses", "goalsFor", "goalsAgainst"].forEach((k) => { t[k] += g[k]; });
     return t;
   }, { tournaments: 0, matches: 0, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0 });
-  return { rows, total };
+
+  // Титулы: одинаковые (этап + сетка) склеиваются в одну плашку по всем форматам сразу.
+  const FORMAT_SHORT = { solo: "соло", pair: "пара", retro: "ретро" };
+  const STAGE_ORDER = ["Победитель", "Финалист", "3 место", "4 место", "Полуфиналист"];
+  const stageRank = (st) => { const i = STAGE_ORDER.indexOf(st); return i === -1 ? STAGE_ORDER.length : i; };
+  const groupedTitles = [];
+  const idx = {};
+  titles.slice().reverse().forEach((t) => { // сначала последние турниры
+    const key = t.stage + "|||" + t.bracket;
+    if (idx[key] === undefined) {
+      idx[key] = groupedTitles.length;
+      groupedTitles.push({ stage: t.stage, bracket: t.bracket, color: t.color, items: [] });
+    }
+    groupedTitles[idx[key]].items.push(t.tournamentName + " · " + FORMAT_SHORT[t.format]);
+  });
+  groupedTitles.sort((a, b) => stageRank(a.stage) - stageRank(b.stage) || b.items.length - a.items.length);
+  const titleSummary = {
+    total: titles.length,
+    wins: titles.filter((t) => t.stage === "Победитель").length,
+    byFormat: FORMATS.map((f) => ({ id: f.id, label: FORMAT_SHORT[f.id], n: titles.filter((t) => t.format === f.id).length })).filter((x) => x.n > 0),
+  };
+  return { rows, total, titles: groupedTitles, titleSummary };
 }
 
 function PersonTotalsModal({ person, tournaments, roster, onClose }) {
-  const { rows, total } = useMemo(() => computePersonTotals(tournaments, roster, person), [tournaments, roster, person]);
+  const { rows, total, titles, titleSummary } = useMemo(() => computePersonTotals(tournaments, roster, person), [tournaments, roster, person]);
   const diff = total.goalsFor - total.goalsAgainst;
   const signed = (n) => (n > 0 ? "+" + n : String(n));
   const winPct = total.matches ? Math.round((total.wins / total.matches) * 100) : 0;
@@ -3724,6 +3749,35 @@ function PersonTotalsModal({ person, tournaments, roster, onClose }) {
             <StatBox label="Разница голов" value={signed(diff)} accent={diff > 0 ? "text-green-600" : diff < 0 ? "text-red-600" : undefined} />
           </div>
           <p className="text-xs text-slate-500 -mt-2">Побед: {winPct}% матчей. «Голы» — забито–пропущено.</p>
+
+          <div>
+            <h3 className="text-xs uppercase tracking-wide text-slate-500 mb-2">
+              Титулы{titleSummary.total > 0 ? ` · всего ${titleSummary.total}, из них побед ${titleSummary.wins}` : ""}
+            </h3>
+            {titleSummary.total === 0 ? (
+              <p className="text-sm text-slate-500">Титулов пока нет.</p>
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-1.5">
+                  {titles.map((t, i) => {
+                    const c = bracketColorClasses(t.bracket, t.color);
+                    const count = t.items.length;
+                    return (
+                      <span key={i} className={`inline-flex items-center gap-1 ${c.bg} border ${c.border} ${c.text} text-xs px-2 py-1 rounded-full`}>
+                        <Trophy size={11} className={`${c.icon} shrink-0`} />
+                        {count > 1 ? `${count}× ` : ""}{t.stage} ({t.bracket}) — {t.items.join(", ")}
+                      </span>
+                    );
+                  })}
+                </div>
+                {titleSummary.byFormat.length > 1 && (
+                  <p className="text-xs text-slate-500 mt-2">
+                    По форматам: {titleSummary.byFormat.map((f) => `${f.label} — ${f.n}`).join(", ")}.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
 
           {rows.length > 0 && (
             <div>
