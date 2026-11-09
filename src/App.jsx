@@ -236,7 +236,7 @@ function computePlayoffStats(wb, players) {
 
   // Пропуск раунда: если игрок начал плей-офф не с первого раунда своей сетки
   // (например, 9-е место сразу во 2-м раунде ЛЕ), каждый пропущенный раунд засчитывается
-  // в очки как победа в этой сетке. Считаем только для сетки, с которой игрок НАЧАЛ плей-офф:
+  // как победа в этой сетке — и в очки, и в статистику (матч +1, победа +1, голы 0:0). Считаем только для сетки, с которой игрок НАЧАЛ плей-офф:
   // кто перешёл из Верхней сетки в Нижнюю, тот не пропускал раунд, а проиграл и спустился.
   const roundsByBracket = {};
   appearances.forEach((a) => { (roundsByBracket[a.bracket] = roundsByBracket[a.bracket] || new Set()).add(a.round); });
@@ -1297,11 +1297,13 @@ function parseTournamentFile(wb) {
   const idealNorm = (idealO / idealMatches) * 10;
 
   const rows = Object.values(players).map((p) => {
-    const played = G + p.poMatches;
+    // Пропущенный раунд плей-офф засчитывается как сыгранный и выигранный матч (без голов)
+    const byes = Object.values(p.byeWins || {}).reduce((x, y) => x + (y || 0), 0);
+    const played = G + p.poMatches + byes;
     const O = computeO(p);
     const norm = played > 0 ? (O / played) * 10 : 0;
     const pct = idealO > 0 ? (O / idealO) * 100 : 0;
-    const wins = p.groupWins + p.playoffWins + p.europaWins + p.intertotoWins;
+    const wins = p.groupWins + p.playoffWins + p.europaWins + p.intertotoWins + byes;
     const draws = p.groupDraws;
     const losses = p.groupLosses + p.playoffLosses;
     const goalsFor = p.groupGoalsFor + p.playoffGoalsFor;
