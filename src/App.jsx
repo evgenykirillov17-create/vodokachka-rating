@@ -123,6 +123,8 @@ function newRecord(name) {
     reachedLCH: false,
     thirdPlaceTop: false, // выиграл матч за 3-е место в Верхней сетке ЛЧ — бонус +1,5
     championTop: false, // выиграл Верхнюю сетку ЛЧ (победитель турнира) — бонус +2
+    championLow: false, // выиграл Лигу Европы — бонус +1
+    byeWins: { top: 0, mid: 0, low: 0, intertoto: 0 }, // пропуск раунда плей-офф (прошёл дальше без матча) — очки как за победу
     bracketStage: {}, // название сетки (как в файле, дословно) -> "semi" | "final" | "champion"
   };
 }
@@ -179,12 +181,26 @@ function computePlayoffStats(wb, players) {
   const headerIdx = findHeaderRow(rows, ["Этап", "Победитель"]);
   if (headerIdx === -1) throw new Error('На листе "4_Плей-офф расписание" не найдена строка заголовков');
   const col = indexHeaders(rows[headerIdx]);
+  const appearances = []; // { name, bracket, round, order } — для поиска пропусков раунда
   for (let r = headerIdx + 1; r < rows.length; r++) {
     const row = rows[r];
     const stage = row[col["Этап"]];
     const status = row[col["Статус"]];
     if (!stage) continue;
     const played = status && String(status).includes("Сыгран");
+    {
+      // "ЛЕ Р2" → сетка "ЛЕ", раунд 2; "ЛЧ ВС Ф" → сетка "ЛЧ ВС", финал. Матч за 3-е место не учитываем.
+      const m = String(stage).trim().match(/^(.*?)\s+(Р\s*(\d+)|Ф)$/i);
+      const tour = Number(row[col["Тур"]]);
+      if (m) {
+        const round = m[3] ? Number(m[3]) : 99;
+        const order = (Number.isFinite(tour) ? tour : 0) * 1000 + r;
+        [row[col["Участник 1"]], row[col["Участник 2"]]].forEach((n) => {
+          const name = normalizeName(n);
+          if (name) appearances.push({ name, bracket: m[1].trim(), round, order, category: stageCategory(stage) });
+        });
+      }
+    }
     const p1 = normalizeName(row[col["Участник 1"]]);
     const p2 = normalizeName(row[col["Участник 2"]]);
     const winner = normalizeName(row[col["Победитель"]]);
@@ -217,6 +233,26 @@ function computePlayoffStats(wb, players) {
       if (loser) (players[loser] || (players[loser] = newRecord(loser))).playoffLosses++;
     }
   }
+
+  // Пропуск раунда: если игрок начал плей-офф не с первого раунда своей сетки
+  // (например, 9-е место сразу во 2-м раунде ЛЕ), каждый пропущенный раунд засчитывается
+  // в очки как победа в этой сетке. Считаем только для сетки, с которой игрок НАЧАЛ плей-офф:
+  // кто перешёл из Верхней сетки в Нижнюю, тот не пропускал раунд, а проиграл и спустился.
+  const roundsByBracket = {};
+  appearances.forEach((a) => { (roundsByBracket[a.bracket] = roundsByBracket[a.bracket] || new Set()).add(a.round); });
+  const firstByPlayer = {};
+  appearances.forEach((a) => {
+    const cur = firstByPlayer[a.name];
+    if (!cur || a.order < cur.order || (a.order === cur.order && a.round < cur.round)) firstByPlayer[a.name] = a;
+  });
+  Object.values(firstByPlayer).forEach((a) => {
+    const rounds = Array.from(roundsByBracket[a.bracket]).sort((x, y) => x - y);
+    const skipped = rounds.indexOf(a.round); // сколько раундов сетки прошло до первого матча игрока
+    if (skipped > 0 && a.category) {
+      const p = players[a.name] || (players[a.name] = newRecord(a.name));
+      p.byeWins[a.category] = (p.byeWins[a.category] || 0) + skipped;
+    }
+  });
 }
 
 function computeBracket(wb, players, bracketOrder) {
@@ -304,6 +340,7 @@ function computeBracket(wb, players, bracketOrder) {
         const p = players[champion] || (players[champion] = newRecord(champion));
         p.bracketStage[title] = "champion";
         if (category === "top") p.championTop = true;
+        if (category === "low") p.championLow = true;
       }
       // Матч за 3-е место — определяет титул точнее, чем общий "Полуфиналист", поэтому
       // переопределяем bracketStage напрямую (не через обычное "только если выше рангом",
@@ -328,7 +365,9 @@ function computeBracket(wb, players, bracketOrder) {
 //   + 1,5 за победу в матче за 3-е место Верхней сетки ЛЧ (чтобы 3-е место ВС было выше
 //   победителя Нижней сетки, у которого бонусы и за полуфинал, и за финал НС),
 //   + 2 за победу в Верхней сетке ЛЧ (победитель турнира должен быть выше победителя НС,
-//   который может собрать бонусы за полуфинал в обеих сетках).
+//   который может собрать бонусы за полуфинал в обеих сетках),
+//   + 1 за победу в Лиге Европы (с 09.11.2026),
+//   пропущенный раунд плей-офф (прошёл дальше без матча) — очки как за победу в этой сетке (с 09.11.2026).
 // Рейтинг за турнир = очки / максимум возможных очков турнира × 100 (не меньше MIN_RATING).
 // Раньше делили на число сыгранных матчей — из-за этого лишняя победа в плей-офф могла
 // снижать рейтинг (победитель ЛК оказывался ниже вылетевших в первом матче).
@@ -341,6 +380,8 @@ function computeO(p) {
   o += p.playoffWins * 3;
   o += p.europaWins * 2;
   o += p.intertotoWins * 1.25;
+  const bye = p.byeWins || {};
+  o += ((bye.top || 0) + (bye.mid || 0)) * 3 + (bye.low || 0) * 2 + (bye.intertoto || 0) * 1.25;
   if (p.semi.top) o += 2;
   if (p.final.top) o += 2;
   if (p.semi.mid) o += 1.5;
@@ -350,6 +391,7 @@ function computeO(p) {
   if (p.reachedLCH) o += 4;
   if (p.thirdPlaceTop) o += 1.5;
   if (p.championTop) o += 2;
+  if (p.championLow) o += 1;
   return o;
 }
 
@@ -1279,7 +1321,7 @@ function parseTournamentFile(wb) {
   rows.sort((a, b) => b.pct - a.pct);
   return {
     rows,
-    meta: { G, vsSize, R, idealO: round3(idealO), idealNorm: round3(idealNorm), formula: "v3-2026-11-02" },
+    meta: { G, vsSize, R, idealO: round3(idealO), idealNorm: round3(idealNorm), formula: "v4-2026-11-09" },
     bracketNames: bracketOrder,
   };
 }
