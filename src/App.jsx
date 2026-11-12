@@ -2208,12 +2208,13 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
 
     const result = [];
     soloStandings.forEach((s) => {
-      if (s.avg <= 50) result.push({ name: s.name, rating: s.avg, played: s.tournamentsPlayed, source: "solo", pairName: null });
+      // Сравниваем с тем же округлённым числом, что видно на сайте: 50,3 показывается как «50» — значит, проходит.
+      if (Math.round(s.avg) <= 50) result.push({ name: s.name, rating: s.avg, played: s.tournamentsPlayed, source: "solo", pairName: null });
     });
 
     const seenFallback = new Set();
     pairStandings.forEach((s) => {
-      if (s.avg > 50) return;
+      if (Math.round(s.avg) > 50) return;
       s.name.split("/").map((p) => p.trim()).forEach((person) => {
         if (hasSoloRecord(person)) return; // если игрок есть в соло (точно или по фамилии) — судим только по соло
         if (seenFallback.has(person)) return;
@@ -2233,7 +2234,7 @@ function ChampionshipList({ tournaments, cutoffs, query, onSelectPlayer }) {
   return (
     <div>
       <p className="text-xs text-slate-500 mb-4">
-        Игроки с рейтингом 50 и ниже (за всё время, без учёта отсечки актуального
+        Игроки с рейтингом 50 и ниже — по округлённому рейтингу, как он показан на сайте (за всё время, без учёта отсечки актуального
         рейтинга): показан соло-рейтинг — а если игрок никогда не играл соло, то рейтинг
         той пары, за которую он выступает (ретро не учитывается). «Турниров» — сколько
         турниров сыграно в том формате, по которому посчитан рейтинг.
