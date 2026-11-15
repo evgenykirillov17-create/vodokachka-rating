@@ -30,6 +30,24 @@ const BLOCK_TITLE_TO_CATEGORY = {
   "КУБОК ИНТЕРТОТО": "intertoto",
 };
 
+// Название блока сетки → категория. Кроме точных названий понимает варианты с приставкой,
+// например «ЛИГА ЕВРОПЫ (2 группы по 3)» — Лига Европы на 6 участников в формате групп.
+function blockCategory(rawTitle) {
+  const t = String(rawTitle || "").trim();
+  if (!t) return undefined;
+  if (BLOCK_TITLE_TO_CATEGORY[t]) return BLOCK_TITLE_TO_CATEGORY[t];
+  const up = t.toUpperCase();
+  if (up.startsWith("ЛИГА ЕВРОПЫ")) return "low";
+  if (up.startsWith("ЛИГА КОНФЕРЕНЦИЙ")) return "intertoto";
+  return undefined;
+}
+
+// Подписи внутри сетки, которые не являются участниками
+function isBracketLabel(raw) {
+  const t = String(raw || "").trim();
+  return /^\d+\s*место$/i.test(t) || /^группа\s+\S+$/i.test(t) || /^золотой матч$/i.test(t);
+}
+
 const STAGE_PREFIXES = [
   { prefix: "ЛЧ ВС", category: "top" },
   { prefix: "ЛЧ НС", category: "mid" },
@@ -262,7 +280,45 @@ function computeBracket(wb, players, bracketOrder) {
   let i = 0;
   while (i < data.length) {
     const rawTitle = String((data[i] || [])[1] || "").trim();
-    const category = BLOCK_TITLE_TO_CATEGORY[rawTitle];
+    const category = blockCategory(rawTitle);
+    // Лига Европы в формате «2 группы по 3 + Золотой матч»: своя разметка, без раундов
+    if (category && /групп/i.test(rawTitle)) {
+      const title = prettyBracketName(rawTitle.replace(/\s*\(.*\)\s*$/, ""));
+      if (bracketOrder && !bracketOrder.includes(title)) bracketOrder.push(title);
+      let r = i + 1;
+      let goldenCol = null;
+      const finalists = [];
+      let champion = null;
+      while (r < data.length) {
+        const row = data[r] || [];
+        if (blockCategory(row[1])) break; // начался следующий блок
+        row.forEach((v, idx) => {
+          if (idx === 0 || !v) return;
+          const raw = String(v).trim();
+          if (/^золотой матч$/i.test(raw)) { goldenCol = idx; return; }
+          if (goldenCol !== null && idx === goldenCol && !isBracketLabel(raw)) {
+            if (raw.startsWith("🏆")) champion = normalizeName(raw.replace("🏆", "").trim());
+            else finalists.push(normalizeName(raw));
+          }
+        });
+        r++;
+      }
+      if (champion && !finalists.includes(champion)) finalists.push(champion);
+      // Финалисты (победители групп) получают бонусы полуфинала и финала ЛЕ — как в обычной сетке.
+      finalists.forEach((name) => {
+        const p = players[name] || (players[name] = newRecord(name));
+        p.semi[category] = true;
+        p.final[category] = true;
+        p.bracketStage[title] = "final";
+      });
+      if (champion) {
+        const p = players[champion] || (players[champion] = newRecord(champion));
+        p.bracketStage[title] = "champion";
+        if (category === "low") p.championLow = true;
+      }
+      i = r;
+      continue;
+    }
     if (category) {
       const title = prettyBracketName(rawTitle);
       if (bracketOrder && !bracketOrder.includes(title)) bracketOrder.push(title);
@@ -285,11 +341,11 @@ function computeBracket(wb, players, bracketOrder) {
       while (r < data.length) {
         const row = data[r] || [];
         const rowTitle = String(row[1] || "").trim();
-        if (BLOCK_TITLE_TO_CATEGORY[rowTitle]) break;
+        if (blockCategory(rowTitle)) break;
         row.forEach((v, idx) => {
           if (idx > 0 && v) {
             const raw = String(v).trim();
-            if (/^\d+\s*место$/i.test(raw)) return; // подпись "3 место" — не имя игрока
+            if (isBracketLabel(raw)) return; // подписи "3 место", "Группа A", "Золотой матч" — не имена игроков
             const cleanName = normalizeName(raw.replace("🏆", "").trim());
             if (cleanName) allNames.add(cleanName);
           }
