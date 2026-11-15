@@ -1548,6 +1548,30 @@ function computeLast3EditionsStandings(tournaments, n = 3) {
   return results.slice(0, 30);
 }
 
+// Дата турнира из названия: «ЧВ49 (23.10.2026)» → 20261023. Нет даты — null.
+function tournamentDateKey(t) {
+  const m = String((t && t.name) || "").match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (!m) return null;
+  return Number(m[3]) * 10000 + Number(m[2]) * 100 + Number(m[1]);
+}
+
+// Турниры всегда храним и показываем по дате (из названия), от старых к новым.
+// От порядка зависит рейтинг («последние 3 турнира») и история в карточке игрока,
+// поэтому заново загруженный старый турнир встаёт на своё место по дате, а не в конец.
+// Турнир без даты в названии остаётся рядом с тем, после которого стоял.
+// Турниры одной даты сохраняют свой прежний порядок.
+function sortTournamentsByDate(list) {
+  if (!Array.isArray(list)) return list;
+  let lastKey = 0;
+  const keyed = list.map((t, i) => {
+    const k = tournamentDateKey(t);
+    if (k !== null) lastKey = k;
+    return { t, i, k: k !== null ? k : lastKey };
+  });
+  keyed.sort((a, b) => a.k - b.k || a.i - b.i);
+  return keyed.map((x) => x.t);
+}
+
 function useStorage() {
   const [tournaments, setTournaments] = useState({ solo: [], pair: [], retro: [] });
   const [cutoffs, setCutoffs] = useState({ solo: null, pair: null, retro: null });
@@ -1565,7 +1589,7 @@ function useStorage() {
       let nextTitlesEnabled = true;
       for (const f of FORMATS) {
         const tRes = await storageGet(`tournaments:${f.id}`);
-        if (tRes && tRes.value) nextT[f.id] = tRes.value;
+        if (tRes && tRes.value) nextT[f.id] = sortTournamentsByDate(tRes.value);
         const cRes = await storageGet(`cutoff:${f.id}`);
         if (cRes && cRes.value) nextC[f.id] = cRes.value.id;
       }
@@ -1589,8 +1613,9 @@ function useStorage() {
   }, []);
 
   const saveTournaments = useCallback(async (format, list) => {
-    setTournaments((prev) => ({ ...prev, [format]: list }));
-    await storageSet(`tournaments:${format}`, list);
+    const sorted = sortTournamentsByDate(list);
+    setTournaments((prev) => ({ ...prev, [format]: sorted }));
+    await storageSet(`tournaments:${format}`, sorted);
   }, []);
 
   const saveCutoff = useCallback(async (format, id) => {
@@ -1697,7 +1722,9 @@ function useStorage() {
   // Полное восстановление из бэкапа (экспорт/импорт JSON) — перезаписывает всё целиком,
   // а не сливает с текущим состоянием.
   const restoreAll = useCallback(async (backup) => {
-    const nextT = backup.tournaments || { solo: [], pair: [], retro: [] };
+    const rawT = backup.tournaments || { solo: [], pair: [], retro: [] };
+    const nextT = {};
+    FORMATS.forEach((f) => { nextT[f.id] = sortTournamentsByDate(rawT[f.id] || []); });
     const nextC = backup.cutoffs || { solo: null, pair: null, retro: null };
     const nextR = backup.roster || [];
     for (const f of FORMATS) {
