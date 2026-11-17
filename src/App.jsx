@@ -1597,7 +1597,7 @@ function allParticipantNames(tournaments, roster) {
   return [...names];
 }
 
-function useStorage() {
+function useStorage(adminAuthed) {
   const [tournaments, setTournaments] = useState({ solo: [], pair: [], retro: [] });
   const [cutoffs, setCutoffs] = useState({ solo: null, pair: null, retro: null });
   const [playerIds, setPlayerIds] = useState({});
@@ -1628,9 +1628,9 @@ function useStorage() {
       const nextSpecialPrizes = spRes && Array.isArray(spRes.value) ? spRes.value : [];
       const idRes = await storageGet("playerIds");
       const usedRes = await storageGet("usedPlayerIds");
-      const assigned = ensurePlayerIds(allParticipantNames(nextT, nextRoster), idRes?.value || {}, usedRes?.value || []);
-      await storageSet("playerIds", assigned.ids);
-      await storageSet("usedPlayerIds", assigned.used);
+      const assigned = { ids: idRes?.value || {}, used: usedRes?.value || [] };
+      // Чтение публичной страницы не должно записывать данные в Firestore.
+      // Присвоение отсутствующих ID сохраняется только авторизованным администратором.
       if (!cancelled) {
         setPlayerIds(assigned.ids);
         setUsedPlayerIds(assigned.used);
@@ -1645,6 +1645,23 @@ function useStorage() {
     load();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!loaded || !adminAuthed) return;
+    // Выполняем миграцию ID только в админской сессии.
+    // Повторные открытия публичной страницы больше не вызывают запись.
+    const assigned = ensurePlayerIds(allParticipantNames(tournaments, roster), playerIds, usedPlayerIds);
+    const idsChanged = Object.keys(assigned.ids).some((name) => assigned.ids[name] !== playerIds[name]);
+    const usedChanged = assigned.used.some((id) => !usedPlayerIds.includes(id));
+    if (!idsChanged && !usedChanged) return;
+    async function persistIds() {
+      await storageSet("playerIds", assigned.ids);
+      await storageSet("usedPlayerIds", assigned.used);
+      setPlayerIds(assigned.ids);
+      setUsedPlayerIds(assigned.used);
+    }
+    persistIds().catch((err) => console.error("Ошибка сохранения ID:", err));
+  }, [loaded, adminAuthed, tournaments, roster, playerIds, usedPlayerIds]);
 
   const saveTournaments = useCallback(async (format, list) => {
     const sorted = sortTournamentsByDate(list);
@@ -4220,10 +4237,10 @@ function AdminGate() {
 }
 
 export default function RatingSite() {
-  const { tournaments, cutoffs, roster, playerIds, usedPlayerIds, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize, renamePlayer } = useStorage();
+  const [adminAuthed, setAdminAuthed] = useState(false);
+  const { tournaments, cutoffs, roster, playerIds, usedPlayerIds, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize, renamePlayer } = useStorage(adminAuthed);
   const [tab, setTab] = useState("rating");
   const [adminSection, setAdminSection] = useState("manage"); // "manage" | "attendance"
-  const [adminAuthed, setAdminAuthed] = useState(false);
   useEffect(() => onAdminChange(setAdminAuthed), []);
 
   return (
