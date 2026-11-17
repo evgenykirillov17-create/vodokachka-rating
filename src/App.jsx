@@ -1572,9 +1572,36 @@ function sortTournamentsByDate(list) {
   return keyed.map((x) => x.t);
 }
 
+// Постоянные пятизначные идентификаторы. Удалённые коды не переиспользуются.
+function ensurePlayerIds(names, existing = {}, used = []) {
+  const ids = { ...existing };
+  const reserved = new Set([...used, ...Object.values(ids)].map(String));
+  for (const name of names) {
+    if (!name || !name.trim() || name.includes("/") || ids[name]) continue;
+    if (reserved.size >= 90000) throw new Error("Закончились пятизначные ID");
+    let code;
+    do { code = String(10000 + Math.floor(Math.random() * 90000)); } while (reserved.has(code));
+    ids[name] = code;
+    reserved.add(code);
+  }
+  return { ids, used: Array.from(reserved) };
+}
+
+function allParticipantNames(tournaments, roster) {
+  const names = new Set(roster.filter((n) => n && !n.includes("/")));
+  Object.values(tournaments).flat().forEach((t) => (t.rows || []).forEach((r) => {
+    const raw = String(r.name || "");
+    if (raw.includes("/")) extractFullNames(raw).forEach((n) => { if (n) names.add(n); });
+    else if (raw.trim()) names.add(raw.trim());
+  }));
+  return [...names];
+}
+
 function useStorage() {
   const [tournaments, setTournaments] = useState({ solo: [], pair: [], retro: [] });
   const [cutoffs, setCutoffs] = useState({ solo: null, pair: null, retro: null });
+  const [playerIds, setPlayerIds] = useState({});
+  const [usedPlayerIds, setUsedPlayerIds] = useState([]);
   const [roster, setRoster] = useState([]); // список известных полных имён игроков
   const [titlesEnabled, setTitlesEnabledState] = useState(true); // показывать ли титулы на сайте
   const [specialPrizes, setSpecialPrizes] = useState([]); // имена игроков, получивших спецприз (галочки в админке)
@@ -1599,7 +1626,14 @@ function useStorage() {
       if (tsRes && tsRes.value) nextTitlesEnabled = tsRes.value.enabled;
       const spRes = await storageGet("specialPrizes");
       const nextSpecialPrizes = spRes && Array.isArray(spRes.value) ? spRes.value : [];
+      const idRes = await storageGet("playerIds");
+      const usedRes = await storageGet("usedPlayerIds");
+      const assigned = ensurePlayerIds(allParticipantNames(nextT, nextRoster), idRes?.value || {}, usedRes?.value || []);
+      await storageSet("playerIds", assigned.ids);
+      await storageSet("usedPlayerIds", assigned.used);
       if (!cancelled) {
+        setPlayerIds(assigned.ids);
+        setUsedPlayerIds(assigned.used);
         setSpecialPrizes(nextSpecialPrizes);
         setTournaments(nextT);
         setCutoffs(nextC);
@@ -1616,7 +1650,12 @@ function useStorage() {
     const sorted = sortTournamentsByDate(list);
     setTournaments((prev) => ({ ...prev, [format]: sorted }));
     await storageSet(`tournaments:${format}`, sorted);
-  }, []);
+    const assigned = ensurePlayerIds(allParticipantNames({ [format]: sorted }, []), playerIds, usedPlayerIds);
+    setPlayerIds(assigned.ids);
+    setUsedPlayerIds(assigned.used);
+    await storageSet("playerIds", assigned.ids);
+    await storageSet("usedPlayerIds", assigned.used);
+  }, [playerIds, usedPlayerIds]);
 
   const saveCutoff = useCallback(async (format, id) => {
     setCutoffs((prev) => ({ ...prev, [format]: id }));
@@ -1636,6 +1675,8 @@ function useStorage() {
     const merged = Array.from(set).sort();
     setRoster(merged);
     await storageSet("roster", merged);
+    // ID выдаётся при появлении игрока в турнире (через saveTournaments),
+    // а не при ручном внесении имени в каталог.
     return merged;
   }, [roster]);
 
@@ -1704,6 +1745,13 @@ function useStorage() {
     // В каталоге: старое имя убираем, новое добавляем (без дублей).
     const nextRoster = Array.from(new Set(roster.filter((n) => n !== oldName).concat([newName]))).sort();
     await storageSet("roster", nextRoster);
+    const nextIds = { ...playerIds };
+    if (nextIds[oldName]) {
+      if (!nextIds[newName]) nextIds[newName] = nextIds[oldName];
+      delete nextIds[oldName];
+      await storageSet("playerIds", nextIds);
+      setPlayerIds(nextIds);
+    }
     let nextPrizes = specialPrizes;
     if (specialPrizes.includes(oldName)) {
       nextPrizes = Array.from(new Set(specialPrizes.map((n) => (n === oldName ? newName : n)))).sort((a, b) => a.localeCompare(b, "ru"));
@@ -1717,7 +1765,7 @@ function useStorage() {
     setRoster(nextRoster);
     setSpecialPrizes(nextPrizes);
     return changedRows;
-  }, [tournaments, roster, specialPrizes]);
+  }, [tournaments, roster, specialPrizes, playerIds]);
 
   // Полное восстановление из бэкапа (экспорт/импорт JSON) — перезаписывает всё целиком,
   // а не сливает с текущим состоянием.
@@ -1732,6 +1780,11 @@ function useStorage() {
       await storageSet(`cutoff:${f.id}`, { id: nextC[f.id] || null });
     }
     await storageSet("roster", nextR);
+    const assigned = ensurePlayerIds(allParticipantNames(nextT, nextR), backup.playerIds || {}, backup.usedPlayerIds || []);
+    await storageSet("playerIds", assigned.ids);
+    await storageSet("usedPlayerIds", assigned.used);
+    setPlayerIds(assigned.ids);
+    setUsedPlayerIds(assigned.used);
     // В старых бэкапах спецпризов нет — тогда текущие галочки не трогаем.
     if (Array.isArray(backup.specialPrizes)) {
       await storageSet("specialPrizes", backup.specialPrizes);
@@ -1742,7 +1795,7 @@ function useStorage() {
     setRoster(nextR);
   }, []);
 
-  return { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize, renamePlayer };
+  return { tournaments, cutoffs, roster, playerIds, usedPlayerIds, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize, renamePlayer };
 }
 
 function MedalBadge({ rank }) {
@@ -2828,7 +2881,7 @@ function TournamentRow({ index, tournament, onRename, onRemove, onEditContents }
   );
 }
 
-function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes }) {
+function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster, playerIds, usedPlayerIds, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes }) {
   const [format, setFormat] = useState("solo");
   const [file, setFile] = useState(null);
   const [name, setName] = useState("");
@@ -2864,7 +2917,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
       // Проверка "это точно тот формат?": в файле пар имена содержат "/", в соло — нет.
       const pairLike = parsed.rows.filter((r) => r.name.includes("/")).length;
       const detected = pairLike > parsed.rows.length / 2 ? "pair" : "solo";
-      if (format !== "retro" && detected !== format) setFormatMismatch(detected);
+      if (format !== "retro" && detected !== (format === "champ" ? "solo" : format)) setFormatMismatch(detected);
 
       if (format === "pair") {
         const uniqueNames = Array.from(new Set(parsed.rows.map((r) => r.name)));
@@ -2892,7 +2945,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
     if (!preview) return;
     const pairLike = preview.rows.filter((r) => r.name.includes("/")).length;
     const detected = pairLike > preview.rows.length / 2 ? "pair" : "solo";
-    setFormatMismatch(format !== "retro" && detected !== format ? detected : null);
+    setFormatMismatch(format !== "retro" && detected !== (format === "champ" ? "solo" : format) ? detected : null);
 
     if (format === "pair") {
       const uniqueNames = Array.from(new Set(preview.rows.map((r) => r.name)));
@@ -2945,7 +2998,9 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
         await addToRoster(rows.map((r) => r.name));
       }
 
+      if (format === "champ") finalRows = finalRows.map((r) => ({ ...r, pct: Math.round(Math.min(80, (Number(r.pct) || 0) * 0.8) * 1000) / 1000 }));
       const record = {
+        tournamentType: format === "champ" ? "champ" : "standard",
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         name: name || "Турнир",
         importedAt: new Date().toISOString(),
@@ -2953,8 +3008,9 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
         meta: preview.meta,
         bracketNames: preview.bracketNames || [],
       };
-      const updated = [...(tournaments[format] || []), record];
-      await saveTournaments(format, updated);
+      const storageFormat = format === "champ" ? "solo" : format;
+      const updated = [...(tournaments[storageFormat] || []), record];
+      await saveTournaments(storageFormat, updated);
       setSuccess(`Турнир «${record.name}» добавлен в формат «${FORMATS.find(f=>f.id===format)?.label}».`);
       setPreview(null);
       setRows([]);
@@ -3065,7 +3121,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
         </button>
       </div>
 
-      <BackupPanel tournaments={tournaments} cutoffs={cutoffs} roster={roster} specialPrizes={specialPrizes} restoreAll={restoreAll} />
+      <BackupPanel tournaments={tournaments} cutoffs={cutoffs} roster={roster} playerIds={playerIds} usedPlayerIds={usedPlayerIds} specialPrizes={specialPrizes} restoreAll={restoreAll} />
 
       <HistoryImport tournaments={tournaments} saveTournaments={saveTournaments} addToRoster={addToRoster} />
 
@@ -3076,7 +3132,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
           <Upload size={18} /> Импорт турнира
         </h3>
         <div className="flex flex-wrap gap-2 mb-4">
-          {FORMATS.map((f) => (
+          {[...FORMATS, { id: "champ", label: "ШИП" }].map((f) => (
             <button
               key={f.id}
               onClick={() => setFormat(f.id)}
@@ -3592,7 +3648,7 @@ function LegacyStatsImport({ tournaments, saveTournaments, addToRoster, roster }
   );
 }
 
-function BackupPanel({ tournaments, cutoffs, roster, specialPrizes, restoreAll }) {
+function BackupPanel({ tournaments, cutoffs, roster, playerIds, usedPlayerIds, specialPrizes, restoreAll }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
 
@@ -3602,6 +3658,8 @@ function BackupPanel({ tournaments, cutoffs, roster, specialPrizes, restoreAll }
       tournaments,
       cutoffs,
       roster,
+      playerIds,
+      usedPlayerIds,
       specialPrizes,
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
@@ -3953,7 +4011,7 @@ function PersonTotalsModal({ person, tournaments, roster, onClose }) {
   );
 }
 
-function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPrize, renamePlayer }) {
+function AttendancePanel({ tournaments, roster, playerIds, specialPrizes, toggleSpecialPrize, renamePlayer }) {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null); // имя, которое сейчас редактируется
   const [draft, setDraft] = useState("");
@@ -4017,6 +4075,7 @@ function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPriz
               <th className="py-3 pl-3 pr-1 w-8 font-medium">#</th>
               <th className="py-3 px-1 sm:px-3 font-medium text-center" title="Спецприз">Приз</th>
               <th className="py-3 px-1 sm:px-3 font-medium">Игрок</th>
+              <th className="py-3 px-1 sm:px-3 font-medium">ID</th>
               <th className="py-3 px-1 sm:px-3 font-medium text-right">Соло</th>
               <th className="py-3 px-1 sm:px-3 font-medium text-right">Пара</th>
               <th className="py-3 px-1 sm:px-3 font-medium text-right">Ретро</th>
@@ -4065,6 +4124,7 @@ function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPriz
                       </span>
                     )}
                   </td>
+                  <td className="py-2 px-1 sm:px-3 text-slate-500 font-mono tabular-nums">{playerIds[r.name] || "—"}</td>
                   <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.solo || "—"}</td>
                   <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.pair || "—"}</td>
                   <td className="py-2 px-1 sm:px-3 text-right text-slate-500 tabular-nums">{r.retro || "—"}</td>
@@ -4074,7 +4134,7 @@ function AttendancePanel({ tournaments, roster, specialPrizes, toggleSpecialPriz
             })}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={7} className="py-6 text-center text-slate-400 text-sm">Никого не найдено</td>
+                <td colSpan={8} className="py-6 text-center text-slate-400 text-sm">Никого не найдено</td>
               </tr>
             )}
           </tbody>
@@ -4128,7 +4188,7 @@ function AdminGate() {
 }
 
 export default function RatingSite() {
-  const { tournaments, cutoffs, roster, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize, renamePlayer } = useStorage();
+  const { tournaments, cutoffs, roster, playerIds, usedPlayerIds, loaded, saveTournaments, saveCutoff, addToRoster, removeFromRoster, restoreAll, titlesEnabled, setTitlesEnabled, specialPrizes, toggleSpecialPrize, renamePlayer } = useStorage();
   const [tab, setTab] = useState("rating");
   const [adminSection, setAdminSection] = useState("manage"); // "manage" | "attendance"
   const [adminAuthed, setAdminAuthed] = useState(false);
@@ -4199,9 +4259,9 @@ export default function RatingSite() {
               ))}
             </div>
             {adminSection === "attendance" ? (
-              <AttendancePanel tournaments={tournaments} roster={roster} specialPrizes={specialPrizes} toggleSpecialPrize={toggleSpecialPrize} renamePlayer={renamePlayer} />
+              <AttendancePanel tournaments={tournaments} roster={roster} playerIds={playerIds} specialPrizes={specialPrizes} toggleSpecialPrize={toggleSpecialPrize} renamePlayer={renamePlayer} />
             ) : (
-              <AdminImport tournaments={tournaments} saveTournaments={saveTournaments} saveCutoff={saveCutoff} cutoffs={cutoffs} roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} restoreAll={restoreAll} titlesEnabled={titlesEnabled} setTitlesEnabled={setTitlesEnabled} specialPrizes={specialPrizes} />
+              <AdminImport tournaments={tournaments} playerIds={playerIds} usedPlayerIds={usedPlayerIds} saveTournaments={saveTournaments} saveCutoff={saveCutoff} cutoffs={cutoffs} roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} restoreAll={restoreAll} titlesEnabled={titlesEnabled} setTitlesEnabled={setTitlesEnabled} specialPrizes={specialPrizes} />
             )}
           </div>
         ) : (
