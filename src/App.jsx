@@ -1655,6 +1655,7 @@ function useStorage() {
     setUsedPlayerIds(assigned.used);
     await storageSet("playerIds", assigned.ids);
     await storageSet("usedPlayerIds", assigned.used);
+    return assigned;
   }, [playerIds, usedPlayerIds]);
 
   const saveCutoff = useCallback(async (format, id) => {
@@ -2892,6 +2893,7 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
   const [busy, setBusy] = useState(false);
   const [success, setSuccess] = useState(null);
   const [formatMismatch, setFormatMismatch] = useState(null); // "pair" | "solo" | null — что похоже на самом деле
+  const [milestones, setMilestones] = useState([]); // уведомление о 10-м / 15-м турнире
 
   const surnameIndex = useMemo(() => buildSurnameIndex(roster), [roster]);
 
@@ -3010,7 +3012,16 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
       };
       const storageFormat = format === "champ" ? "solo" : format;
       const updated = [...(tournaments[storageFormat] || []), record];
-      await saveTournaments(storageFormat, updated);
+      // Сравниваем посещаемость до и после сохранения по всем трём форматам.
+      // Считаем один турнир один раз на человека, включая участников пар.
+      const before = new Map(computeAttendance(tournaments, roster).map((p) => [p.name, p.total]));
+      const after = computeAttendance({ ...tournaments, [storageFormat]: updated },
+        Array.from(new Set([...roster, ...finalRows.flatMap((r) => extractFullNames(r.name))])));
+      const assignedIds = await saveTournaments(storageFormat, updated);
+      const reached = after.filter((p) =>
+        (p.total === 10 || p.total === 15) && (before.get(p.name) || 0) === p.total - 1
+      ).map((p) => ({ name: p.name, id: assignedIds.ids[p.name] || playerIds[p.name] || "—", total: p.total }));
+      setMilestones(reached);
       setSuccess(`Турнир «${record.name}» добавлен в формат «${FORMATS.find(f=>f.id===format)?.label}».`);
       setPreview(null);
       setRows([]);
@@ -3354,6 +3365,27 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
       </div>
 
       <RosterPanel roster={roster} addToRoster={addToRoster} removeFromRoster={removeFromRoster} />
+
+      {milestones.length > 0 && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Юбилейные турниры">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 text-slate-900">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-lg flex items-center gap-2"><Trophy size={21} className="text-amber-500" /> Юбилей участия!</h3>
+              <button onClick={() => setMilestones([])} aria-label="Закрыть"><X size={20} /></button>
+            </div>
+            <p className="text-sm text-slate-600 mb-4">После загрузки турнира следующие участники достигли отметки по всем форматам (соло, пары и ретро):</p>
+            <div className="space-y-2 max-h-72 overflow-y-auto">
+              {milestones.map((p) => (
+                <div key={p.name} className="rounded-lg bg-slate-100 border border-slate-200 p-3 flex items-center justify-between gap-3">
+                  <div><div className="font-semibold">{p.name}</div><div className="text-sm text-slate-500">ID: <span className="font-mono">{p.id}</span></div></div>
+                  <span className="font-bold text-amber-700 whitespace-nowrap">{p.total}-й турнир</span>
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setMilestones([])} style={{ backgroundColor: BRAND_BLUE }} className="mt-5 w-full rounded-md text-white py-2 font-medium">Понятно</button>
+          </div>
+        </div>
+      )}
 
       {editingTournamentObj && (
         <TournamentEditModal
