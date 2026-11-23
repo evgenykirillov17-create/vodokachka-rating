@@ -3017,7 +3017,8 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
         await addToRoster(rows.map((r) => r.name));
       }
 
-      if (format === "champ") finalRows = finalRows.map((r) => ({ ...r, pct: Math.round(Math.min(80, (Number(r.pct) || 0) * 0.8) * 1000) / 1000 }));
+      // rows хранит базовую шкалу 0–100; для ШИПа конвертируем в 0–80 ровно один раз при сохранении.
+      if (format === "champ") finalRows = finalRows.map((r) => ({ ...r, pct: Math.round(Math.max(0, Math.min(100, Number(r.pct) || 0)) * 0.8 * 1000) / 1000 }));
       const record = {
         tournamentType: format === "champ" ? "champ" : "standard",
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -3288,9 +3289,12 @@ function AdminImport({ tournaments, saveTournaments, saveCutoff, cutoffs, roster
                         <input
                           type="number"
                           step="0.1"
-                          value={r.pct}
+                          value={format === "champ" && r.pct !== "" ? Math.round(Math.max(0, Math.min(100, Number(r.pct) || 0)) * 0.8 * 1000) / 1000 : r.pct}
+                          max={format === "champ" ? 80 : 100}
+                          min={0}
                           onChange={(e) => {
-                            const val = e.target.value === "" ? "" : Number(e.target.value);
+                            const entered = e.target.value === "" ? "" : Number(e.target.value);
+                            const val = entered === "" ? "" : format === "champ" ? Math.max(0, Math.min(80, entered)) / 0.8 : entered;
                             setRows((prev) => prev.map((row, idx) => (idx === i ? { ...row, pct: val } : row)));
                           }}
                           className="w-20 bg-slate-100 border border-slate-300 rounded px-1.5 py-0.5 text-right tabular-nums"
